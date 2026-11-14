@@ -1,0 +1,52 @@
+// niri config for verifying the scratchpad in the nested session: xtask/assets/nested-niri.kdl
+// plus the hidden scratch workspace, which only the ashd niri fork accepts.
+//   NIRI=<fork debug binary> cargo xtask nested start --niri-config <this file>
+input {
+    keyboard {
+        xkb {
+            layout "us,ru"
+        }
+    }
+}
+
+layout {
+    gaps 12
+    center-focused-column "never"
+    default-column-width { proportion 0.5; }
+    background-color "#111110"
+    focus-ring {
+        width 1
+        active-color "#E0A458"
+        inactive-color "#2A2A27"
+    }
+    border {
+        off
+    }
+}
+
+prefer-no-csd
+
+hotkey-overlay {
+    skip-at-startup
+}
+
+animations {
+    off
+}
+
+// The test driver parks the pointer at (0,0): no overview hot corner.
+gestures {
+    hot-corners {
+        off
+    }
+}
+
+screenshot-path null
+
+// Named workspaces give the origin labels something to say ("from 01 code"); the hidden
+// one is the scratchpad (`ashd scratch hide` / `show`).
+workspace "code"
+workspace "web"
+workspace "scratch" {
+    hidden
+}

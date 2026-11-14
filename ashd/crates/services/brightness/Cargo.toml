@@ -1,0 +1,23 @@
+[package]
+name = "ashd-svc-brightness"
+description = "Display brightness: backlight (logind SetBrightness), DDC/CI over I2C, fake backend. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ashd-tokens.workspace = true
+zbus.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

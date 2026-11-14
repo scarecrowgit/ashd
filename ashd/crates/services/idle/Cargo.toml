@@ -1,0 +1,28 @@
+[package]
+name = "ashd-svc-idle"
+description = "Idle stages: ext-idle-notify-v1 -> lock request / monitors off. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+ashd-niri.workspace = true
+ashd-tokens.workspace = true
+ashd-svc-logind.workspace = true
+zbus.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+humantime.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

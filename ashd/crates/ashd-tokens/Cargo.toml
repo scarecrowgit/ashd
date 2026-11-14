@@ -1,0 +1,20 @@
+[package]
+name = "ashd-tokens"
+description = "Design tokens (tokens/tokens.json), layout metrics, motion constants and theme-file renderers. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true

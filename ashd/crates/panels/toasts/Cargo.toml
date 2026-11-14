@@ -1,0 +1,20 @@
+[package]
+name = "ashd-panel-toasts"
+description = "Notification toasts stacked above the status bar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+ashd-ui.workspace = true
+ashd-shell-core.workspace = true
+ashd-ipc.workspace = true
+ashd-svc-notifications.workspace = true
+ashd-tokens.workspace = true
+chrono.workspace = true
+image.workspace = true

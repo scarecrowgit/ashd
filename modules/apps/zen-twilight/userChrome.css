@@ -1,0 +1,13 @@
+#main-window,
+#tabbrowser-tabbox,
+.browserSidebarContainer,
+#sidebar-box,
+.browserContainer,
+#appcontent {
+  background: var(--lwt-accent-color) !important;
+}
+
+#navigator-toolbox,
+#zen-appcontent-navbar-container {
+  background: var(--toolbar-bgcolor) !important;
+}

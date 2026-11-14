@@ -1,0 +1,21 @@
+[package]
+name = "ashd-svc-bluetooth"
+description = "BlueZ adapter and devices over D-Bus (zbus 5), with a pairing agent. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zbus.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+futures-lite.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }

@@ -1,0 +1,30 @@
+[package]
+name = "ashd-panel-quick-settings"
+description = "Quick settings popup growing up from the status bar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+ashd-ui.workspace = true
+ashd-shell-core.workspace = true
+ashd-ipc.workspace = true
+ashd-svc-audio.workspace = true
+ashd-svc-logind.workspace = true
+ashd-svc-nightlight.workspace = true
+ashd-svc-brightness.workspace = true
+ashd-svc-network.workspace = true
+ashd-svc-bluetooth.workspace = true
+ashd-tokens.workspace = true
+ashd-niri.workspace = true
+ashd-theme.workspace = true
+rustix.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "ashd-svc-logind"
+description = "org.freedesktop.login1 session/manager: lock signals, power actions (zbus 5). No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zbus.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+futures-lite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }

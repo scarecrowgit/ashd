@@ -1,0 +1,30 @@
+# VENDORED COPY of `niri-ipc` from the niri fork
+#   repo:   https://github.com/scarecrowgit/niri (branch `ashd`)
+#   commit: 836100bd (ashd fork: canvas, hidden workspaces, view IPC, quiet screenshots, visual workspace indices)
+#   licence: GPL-3.0-or-later (see LICENSE, copied from the niri repo root)
+#
+# src/ is byte-identical to niri-ipc/src at that commit. Only this manifest differs
+# (workspace inheritance replaced by literal values). Re-sync whenever the fork's IPC
+# changes:  rsync -a --delete ../../../niri/niri-ipc/src/ src/  and bump the commit above.
+[package]
+name = "niri-ipc"
+version = "26.4.0"
+authors = ["Ivan Molodetskikh <yalterz@gmail.com>"]
+license = "GPL-3.0-or-later"
+edition = "2021"
+repository = "https://github.com/niri-wm/niri"
+description = "Types and helpers for interfacing with the niri Wayland compositor."
+keywords = ["wayland"]
+categories = ["api-bindings", "os"]
+readme = "README.md"
+publish = false
+
+[dependencies]
+clap = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+clap = ["dep:clap"]
+# Upstream pulls in schemars here; not needed by ashd (declared so the cfg stays known).
+json-schema = []

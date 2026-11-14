@@ -1,0 +1,28 @@
+[package]
+name = "ashd-svc-network"
+description = "Network state: read-only sysfs/procfs backend (default) and a NetworkManager backend (zbus 5). No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zbus.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+futures-lite.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+zeroize.workspace = true
+# `net` for `getifaddrs` (local, no traffic).
+nix = { workspace = true, features = ["net"] }
+
+[dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }
+tempfile.workspace = true

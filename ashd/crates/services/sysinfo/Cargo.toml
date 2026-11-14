@@ -1,0 +1,16 @@
+[package]
+name = "ashd-svc-sysinfo"
+description = "CPU / memory / temperature sampling for the status bar. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sysinfo.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+tracing.workspace = true

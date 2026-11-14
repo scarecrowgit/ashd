@@ -1,0 +1,40 @@
+[package]
+name = "ashd-shell-core"
+description = "Shell runtime: Shell root state, Panel trait, OverlayHost, surface registry, IPC dispatch, service bridges."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+ashd-tokens.workspace = true
+ashd-ui.workspace = true
+ashd-ipc.workspace = true
+ashd-niri.workspace = true
+ashd-svc-apps.workspace = true
+ashd-svc-notifications.workspace = true
+ashd-svc-audio.workspace = true
+ashd-svc-logind.workspace = true
+ashd-svc-clipboard.workspace = true
+ashd-svc-mpris.workspace = true
+ashd-svc-idle.workspace = true
+ashd-svc-nightlight.workspace = true
+ashd-svc-brightness.workspace = true
+ashd-svc-polkit.workspace = true
+ashd-svc-tray.workspace = true
+ashd-svc-network.workspace = true
+ashd-svc-bluetooth.workspace = true
+ashd-svc-sysinfo.workspace = true
+anyhow.workspace = true
+async-channel.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shlex.workspace = true

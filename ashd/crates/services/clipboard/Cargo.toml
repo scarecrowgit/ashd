@@ -1,0 +1,27 @@
+[package]
+name = "ashd-svc-clipboard"
+description = "Clipboard history (ext-data-control-v1 / wlr-data-control). No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+redb.workspace = true
+image.workspace = true
+async-channel.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

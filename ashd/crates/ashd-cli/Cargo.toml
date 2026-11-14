@@ -1,0 +1,29 @@
+[package]
+name = "ashd-cli"
+description = "The `ashd` CLI: talks to ashd-shell over ashd-ipc, renders theme files, niri helpers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ashd"
+path = "src/main.rs"
+
+[dependencies]
+ashd-ipc.workspace = true
+ashd-tokens.workspace = true
+ashd-niri.workspace = true
+ashd-theme.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+serde_json.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+pretty_assertions.workspace = true

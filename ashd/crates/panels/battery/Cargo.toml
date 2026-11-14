@@ -1,0 +1,20 @@
+[package]
+name = "ashd-panel-battery"
+description = "Critical-battery dialog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+ashd-ui.workspace = true
+ashd-shell-core.workspace = true
+ashd-ipc.workspace = true
+ashd-svc-sysinfo.workspace = true
+ashd-svc-logind.workspace = true
+ashd-tokens.workspace = true
+tracing.workspace = true

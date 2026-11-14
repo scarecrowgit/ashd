@@ -1,0 +1,18 @@
+[package]
+name = "ashd-panel-media"
+description = "Media popup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+ashd-ui.workspace = true
+ashd-shell-core.workspace = true
+ashd-ipc.workspace = true
+ashd-svc-mpris.workspace = true
+ashd-tokens.workspace = true

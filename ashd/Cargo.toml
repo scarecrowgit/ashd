@@ -1,0 +1,237 @@
+# ashd — desktop shell workspace. See ARCHITECTURE.md (how it is built) and
+# ../docs/GPUI-NOTES.md (why gpui is pinned the way it is).
+#
+# Only the integrator edits this file and Cargo.lock. Crates may use any
+# dependency listed in [workspace.dependencies] (`foo.workspace = true` in their own
+# crate's Cargo.toml) but must not add new ones here.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/ashd-tokens",
+    "crates/ashd-ui",
+    "crates/ashd-ipc",
+    "crates/ashd-niri",
+    "crates/ashd-shell-core",
+    "crates/ashd-shell",
+    "crates/ashd-cli",
+    "crates/ashd-theme",
+    "crates/ashd-gfx",
+    "crates/ashd-lockui",
+    "crates/ashd-lock",
+    "crates/ashd-greeter",
+    # services (no GPUI)
+    "crates/services/apps",
+    "crates/services/notifications",
+    "crates/services/audio",
+    "crates/services/logind",
+    "crates/services/sysinfo",
+    "crates/services/mpris",
+    "crates/services/upower",
+    "crates/services/network",
+    "crates/services/bluetooth",
+    "crates/services/clipboard",
+    "crates/services/idle",
+    "crates/services/nightlight",
+    "crates/services/brightness",
+    "crates/services/polkit",
+    "crates/services/tray",
+    # panels (GPUI)
+    "crates/panels/rail",
+    "crates/panels/bar",
+    "crates/panels/dock",
+    "crates/panels/launcher",
+    "crates/panels/toasts",
+    "crates/panels/osd",
+    "crates/panels/quick_settings",
+    "crates/panels/session",
+    "crates/panels/scratchpad",
+    "crates/panels/strip_header",
+    "crates/panels/canvas_hud",
+    "crates/panels/minimap",
+    "crates/panels/calendar",
+    "crates/panels/media",
+    "crates/panels/clipboard",
+    "crates/panels/cheatsheet",
+    "crates/panels/notification_center",
+    "crates/panels/screenshot",
+    "crates/panels/polkit_dialog",
+    "crates/panels/battery",
+    "crates/panels/theme_switcher",
+    "vendor/niri-ipc",
+    "xtask",
+]
+# = what packages/ashd builds (`-p ashd-shell -p ashd-cli -p ashd-lock -p ashd-greeter`).
+default-members = ["crates/ashd-shell", "crates/ashd-cli", "crates/ashd-lock", "crates/ashd-greeter"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# niri-ipc (vendored) is GPL-3.0-or-later and gpui is Apache-2.0: the shell as a whole
+# is GPL-3.0-or-later.
+license = "GPL-3.0-or-later"
+publish = false
+rust-version = "1.97"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# GPUI builder chains and Render signatures trip these constantly.
+too_many_arguments = "allow"
+type_complexity = "allow"
+new_without_default = "allow"
+
+[workspace.dependencies]
+# ── workspace crates ──────────────────────────────────────────────────────────
+ashd-tokens = { path = "crates/ashd-tokens" }
+ashd-ui = { path = "crates/ashd-ui" }
+ashd-ipc = { path = "crates/ashd-ipc" }
+ashd-niri = { path = "crates/ashd-niri" }
+ashd-theme = { path = "crates/ashd-theme" }
+ashd-shell-core = { path = "crates/ashd-shell-core" }
+ashd-gfx = { path = "crates/ashd-gfx" }
+ashd-lockui = { path = "crates/ashd-lockui" }
+niri-ipc = { path = "vendor/niri-ipc" }
+ashd-svc-apps = { path = "crates/services/apps" }
+ashd-svc-notifications = { path = "crates/services/notifications" }
+ashd-svc-audio = { path = "crates/services/audio" }
+ashd-svc-logind = { path = "crates/services/logind" }
+ashd-svc-sysinfo = { path = "crates/services/sysinfo" }
+ashd-svc-mpris = { path = "crates/services/mpris" }
+ashd-svc-upower = { path = "crates/services/upower" }
+ashd-svc-network = { path = "crates/services/network" }
+ashd-svc-bluetooth = { path = "crates/services/bluetooth" }
+ashd-svc-clipboard = { path = "crates/services/clipboard" }
+ashd-svc-idle = { path = "crates/services/idle" }
+ashd-svc-nightlight = { path = "crates/services/nightlight" }
+ashd-svc-brightness = { path = "crates/services/brightness" }
+ashd-svc-polkit = { path = "crates/services/polkit" }
+ashd-svc-tray = { path = "crates/services/tray" }
+ashd-panel-rail = { path = "crates/panels/rail" }
+ashd-panel-bar = { path = "crates/panels/bar" }
+ashd-panel-dock = { path = "crates/panels/dock" }
+ashd-panel-launcher = { path = "crates/panels/launcher" }
+ashd-panel-toasts = { path = "crates/panels/toasts" }
+ashd-panel-osd = { path = "crates/panels/osd" }
+ashd-panel-quick-settings = { path = "crates/panels/quick_settings" }
+ashd-panel-session = { path = "crates/panels/session" }
+ashd-panel-scratchpad = { path = "crates/panels/scratchpad" }
+ashd-panel-strip-header = { path = "crates/panels/strip_header" }
+ashd-panel-canvas-hud = { path = "crates/panels/canvas_hud" }
+ashd-panel-minimap = { path = "crates/panels/minimap" }
+ashd-panel-calendar = { path = "crates/panels/calendar" }
+ashd-panel-media = { path = "crates/panels/media" }
+ashd-panel-clipboard = { path = "crates/panels/clipboard" }
+ashd-panel-cheatsheet = { path = "crates/panels/cheatsheet" }
+ashd-panel-notification-center = { path = "crates/panels/notification_center" }
+ashd-panel-screenshot = { path = "crates/panels/screenshot" }
+ashd-panel-polkit-dialog = { path = "crates/panels/polkit_dialog" }
+ashd-panel-battery = { path = "crates/panels/battery" }
+ashd-panel-theme-switcher = { path = "crates/panels/theme_switcher" }
+
+# ── GPUI (Zed git, ONE rev for every gpui crate; see docs/GPUI-NOTES.md) ───────
+gpui = { git = "https://github.com/zed-industries/zed", rev = "69239eb54067293f1b646a7dd7f83fc4f62af728", default-features = false, features = ["wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "69239eb54067293f1b646a7dd7f83fc4f62af728", default-features = false, features = ["wayland"] }
+
+# ── general ───────────────────────────────────────────────────────────────────
+anyhow = "1.0.100"
+thiserror = "2.0.12"
+serde = { version = "1.0.220", features = ["derive", "rc"] }
+serde_json = "1.0.144"
+toml = "1"
+smol = "2.0"
+async-channel = "2.5"
+async-io = "2.6"
+async-net = "2.0"
+async-lock = "3.4"
+futures = "0.3.34"
+futures-lite = "2.6"
+clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "tracing-log"] }
+log = "0.4"
+chrono = { version = "0.4.42", default-features = false, features = ["std", "clock", "serde"] }
+humantime = "2.2"
+uuid = { version = "1.18", features = ["v5", "serde"] }
+dirs = "6.0"
+xdg = "3.0"
+rustix = { version = "1.1", features = ["process", "fs", "net", "termios", "system"] }
+nix = { version = "0.30", features = ["signal", "process", "user", "fs", "socket", "poll"] }
+libc = "0.2"
+shlex = "1.3"
+which = "8.0"
+parking_lot = "0.12"
+smallvec = "1.15"
+bitflags = "2.9"
+unicode-segmentation = "1.12"
+rust-embed = { version = "8.7", features = ["include-exclude"] }
+tempfile = "3.20"
+walkdir = "2.5"
+ignore = "0.4"
+
+# ── D-Bus / system services ───────────────────────────────────────────────────
+zbus = { version = "5.11", default-features = false, features = ["async-io"] }
+zvariant = "5.7"
+libpulse-binding = "2.30"
+sysinfo = { version = "0.40", default-features = false, features = ["system", "component", "disk", "network"] }
+freedesktop-desktop-entry = "0.8"
+freedesktop-icons = "0.4"
+nucleo-matcher = "0.3"
+redb = "4"
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+fend-core = "1.5"
+emojis = "0.9"
+
+# ── lock / greeter / non-GPUI graphics ────────────────────────────────────────
+zeroize = { version = "1.8", features = ["derive"] }
+pam-client = { version = "0.5", default-features = false }
+greetd_ipc = { version = "0.10", features = ["sync-codec"] }
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31.11"
+wayland-backend = { version = "0.3.11", features = ["client_system"] }
+wayland-protocols = { version = "0.32.9", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3.9", features = ["client"] }
+calloop = "0.14.3"
+raw-window-handle = "0.6"
+# crates.io wgpu 30 for vello (ashd-gfx → ashd-lock/ashd-greeter only). gpui uses its
+# own git rev of wgpu (30.0.0 + API changes vello 0.12 does not compile against), so the
+# lock has two wgpu packages; no binary links both. See docs/GPUI-NOTES.md "wgpu".
+wgpu = { version = "30.0.0", default-features = false, features = ["std", "wgsl", "vulkan", "gles"] }
+vello = "0.12"
+parley = "0.13"
+pollster = "1.0"
+
+# ── dev ───────────────────────────────────────────────────────────────────────
+pretty_assertions = "1.4"
+
+# Zed's root Cargo.toml patches these for gpui; [patch] does not propagate to
+# consumers, so they are replicated here (same revs as the pinned Zed rev). Keep in
+# sync with Zed when bumping the gpui rev — see docs/GPUI-NOTES.md.
+[patch.crates-io]
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+incremental = true
+
+# Dependencies (gpui, wgpu, taffy, resvg …) optimised even in dev: a 180 Hz shell at
+# opt-level 0 drops frames, and dependency artifacts are built once in the shared
+# target dir anyway.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev.build-override]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"

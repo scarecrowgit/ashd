@@ -1,0 +1,21 @@
+[package]
+name = "ashd-panel-clipboard"
+description = "Clipboard manager: history list, search, filters and a preview pane."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+ashd-ui.workspace = true
+ashd-shell-core.workspace = true
+ashd-ipc.workspace = true
+ashd-svc-clipboard.workspace = true
+ashd-tokens.workspace = true
+nucleo-matcher.workspace = true
+chrono.workspace = true
+dirs.workspace = true

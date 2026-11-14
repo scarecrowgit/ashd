@@ -1,0 +1,23 @@
+[package]
+name = "ashd-gfx"
+description = "Non-GPUI layer-shell/session-lock surfaces drawn with wgpu + vello (lock screen, greeter)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ashd-tokens.workspace = true
+anyhow.workspace = true
+wgpu.workspace = true
+vello.workspace = true
+parley.workspace = true
+raw-window-handle.workspace = true
+smithay-client-toolkit.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+pollster.workspace = true
+log.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "ashd-theme"
+description = "Applying a theme (persist, write generated files, reload consumers) and the fm launcher — shared by ashd-cli, quick settings and the theme switcher. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ashd-tokens.workspace = true
+ashd-niri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

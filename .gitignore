@@ -1,0 +1,17 @@
+result
+
+# Local Nix environment caches
+.direnv/
+
+# Editor junk
+*~
+*.swp
+*.swo
+
+# Local checkout of hermes-agent (separate git repo)
+/hermes-agent/
+
+# Rust build output and verification screenshots written by `cargo xtask`
+/ashd/target/
+/ashd/target-notes/
+result-*

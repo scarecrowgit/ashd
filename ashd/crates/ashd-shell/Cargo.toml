@@ -1,0 +1,51 @@
+[package]
+name = "ashd-shell"
+description = "The ashd-shell binary: registers every panel and runs ashd-shell-core. Wiring only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ashd-shell"
+path = "src/main.rs"
+
+[dependencies]
+ashd-shell-core.workspace = true
+ashd-tokens.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ashd-panel-rail.workspace = true
+ashd-panel-bar.workspace = true
+ashd-panel-dock.workspace = true
+ashd-panel-launcher.workspace = true
+ashd-panel-toasts.workspace = true
+ashd-panel-osd.workspace = true
+ashd-panel-quick-settings.workspace = true
+ashd-panel-session.workspace = true
+ashd-panel-scratchpad.workspace = true
+ashd-panel-strip-header.workspace = true
+ashd-panel-canvas-hud.workspace = true
+ashd-panel-minimap.workspace = true
+ashd-panel-calendar.workspace = true
+ashd-panel-media.workspace = true
+ashd-panel-clipboard.workspace = true
+ashd-panel-cheatsheet.workspace = true
+ashd-panel-notification-center.workspace = true
+ashd-panel-screenshot.workspace = true
+ashd-panel-polkit-dialog.workspace = true
+ashd-panel-battery.workspace = true
+ashd-panel-theme-switcher.workspace = true
+
+[dev-dependencies]
+# examples/spike.rs
+gpui.workspace = true
+gpui_platform.workspace = true
+ashd-ui.workspace = true
+async-channel.workspace = true
+uuid.workspace = true

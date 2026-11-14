@@ -1,0 +1,19 @@
+[package]
+name = "ashd-svc-audio"
+description = "PulseAudio / pipewire-pulse sinks, sources and volume. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libpulse-binding.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

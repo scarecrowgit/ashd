@@ -1,0 +1,26 @@
+[package]
+name = "ashd-svc-nightlight"
+description = "Night light: colour temperature via wlr-gamma-control, schedules, solar times. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+ashd-tokens.workspace = true
+chrono.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+nix.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

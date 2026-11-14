@@ -1,0 +1,25 @@
+[package]
+name = "ashd-svc-polkit"
+description = "Polkit authentication agent: registration, request queue, helper conversation (zbus 5). No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zbus.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+futures-lite.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true

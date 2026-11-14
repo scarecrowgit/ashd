@@ -1,0 +1,25 @@
+[package]
+name = "ashd-ipc"
+description = "ashd CLI <-> ashd-shell protocol: NDJSON Request/Response over $XDG_RUNTIME_DIR/ashd/shell.sock. No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ashd-tokens.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+futures-lite.workspace = true
+tracing.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+pretty_assertions.workspace = true

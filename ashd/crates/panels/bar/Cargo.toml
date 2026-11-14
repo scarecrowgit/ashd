@@ -1,0 +1,24 @@
+[package]
+name = "ashd-panel-bar"
+description = "Bottom status bar and bottom-right workspace label + Scroll|Canvas toggle."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+ashd-ui.workspace = true
+ashd-shell-core.workspace = true
+ashd-ipc.workspace = true
+ashd-svc-mpris.workspace = true
+ashd-tokens.workspace = true
+ashd-niri.workspace = true
+ashd-svc-sysinfo.workspace = true
+ashd-svc-network.workspace = true
+ashd-svc-audio.workspace = true
+ashd-svc-tray.workspace = true
+chrono.workspace = true

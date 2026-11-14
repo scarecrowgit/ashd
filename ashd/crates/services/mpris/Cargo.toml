@@ -1,0 +1,22 @@
+[package]
+name = "ashd-svc-mpris"
+description = "MPRIS media players on the session bus (zbus 5). No GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zbus.workspace = true
+zvariant.workspace = true
+smol.workspace = true
+async-channel.workspace = true
+futures-lite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# tests/bus.rs and examples/mock_player.rs (a mock MPRIS player, `tests/support/mock.rs`).
+image.workspace = true

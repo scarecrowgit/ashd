@@ -159,3 +159,25 @@ Things only real hardware can show:
 Monitor modes: leave the refresh rate out (`mode = "1920x1080"`) to get the highest one. A
 rate must match a mode from `niri msg outputs` to three decimals; anything else silently
 falls back to the preferred mode.
+
+## Publishing
+
+The public repository ([scarecrowgit/ashd](https://github.com/scarecrowgit/ashd)) is this
+tree without `docs/design` (the design mockups), on its own history. To publish the
+current `HEAD` as the next commit there, from a checkout that has the `ashd` remote:
+
+```sh
+git fetch ashd main
+idx=$(mktemp -u)
+GIT_INDEX_FILE=$idx git read-tree HEAD
+GIT_INDEX_FILE=$idx git rm -r -q --cached --ignore-unmatch docs/design
+tree=$(GIT_INDEX_FILE=$idx git write-tree); rm -f $idx
+git push ashd "$(git commit-tree $tree -p ashd/main -m 'describe the change')":main
+```
+
+Check afterwards that it evaluates to the same system as the local tree:
+
+```sh
+nix eval --raw github:scarecrowgit/ashd#nixosConfigurations.Ivant-main.config.system.build.toplevel.outPath
+nix eval --raw .#nixosConfigurations.Ivant-main.config.system.build.toplevel.outPath
+```

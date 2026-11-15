@@ -155,6 +155,45 @@ pub fn terminal_command() -> Vec<String> {
     vec!["xterm".into(), "-e".into()]
 }
 
+/// The flags that make a terminal keep its window open after the program exits, for the
+/// terminals that have one (`None`: wrap the program, see [`in_terminal_hold`]).
+fn hold_flags(bin: &str) -> Option<&'static [&'static str]> {
+    match Path::new(bin).file_name().and_then(|n| n.to_str()).unwrap_or(bin) {
+        "kitty" | "foot" | "alacritty" | "konsole" => Some(&["--hold"]),
+        "xterm" => Some(&["-hold"]),
+        "ghostty" => Some(&["--wait-after-command=true"]),
+        _ => None,
+    }
+}
+
+/// The script of the generic "keep it open" wrapper: runs its arguments, reports the exit
+/// status and waits for Enter. The program is passed as arguments, never interpolated, so
+/// no quoting of the user's command is involved.
+const HOLD_SCRIPT: &str = r#""$@"; ec=$?; printf '\n[exit %s] press Enter to close ' "$ec"; read -r _; exit "$ec""#;
+
+/// argv that runs `argv` in the terminal `prefix` (see [`terminal_command`]) and leaves the
+/// window open after the program exits, so its output can be read. `kitty` + `sh -lc CMD`
+/// gives `kitty --hold sh -lc CMD`; a terminal without a hold flag (wezterm, gnome-terminal,
+/// anything custom) gets the program wrapped in `sh -c` instead.
+pub fn in_terminal_hold(prefix: &[String], argv: &[String]) -> Vec<String> {
+    let Some(bin) = prefix.first() else { return argv.to_vec() };
+    match hold_flags(bin) {
+        Some(flags) => {
+            let mut out = vec![bin.clone()];
+            out.extend(flags.iter().map(|s| s.to_string()));
+            out.extend(prefix[1..].iter().cloned());
+            out.extend(argv.iter().cloned());
+            out
+        }
+        None => {
+            let mut out = prefix.to_vec();
+            out.extend(["sh".to_string(), "-c".into(), HOLD_SCRIPT.into(), "ashd-hold".into()]);
+            out.extend(argv.iter().cloned());
+            out
+        }
+    }
+}
+
 fn exec_flag(bin: &str) -> &'static [&'static str] {
     match Path::new(bin).file_name().and_then(|n| n.to_str()).unwrap_or(bin) {
         "kitty" | "foot" => &[],
@@ -326,6 +365,26 @@ mod tests {
             icon_theme: "hicolor".into(),
             path: vec![],
         }
+    }
+
+    #[test]
+    fn hold_uses_the_terminals_own_flag_or_a_wrapper() {
+        let sh = |c: &str| ["sh", "-lc", c].map(String::from).to_vec();
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // the command is one argv element, verbatim: quotes, `$` and newlines stay intact
+        let nasty = "echo 'a b' \"c\" $HOME; ls\nfalse";
+        assert_eq!(in_terminal_hold(&v(&["kitty"]), &sh(nasty)), [vec!["kitty", "--hold", "sh", "-lc"], vec![nasty]].concat());
+        // the flag goes right after the binary, before the terminal's own execute flag
+        assert_eq!(in_terminal_hold(&v(&["xterm", "-e"]), &sh("ls")), v(&["xterm", "-hold", "-e", "sh", "-lc", "ls"]));
+        assert_eq!(in_terminal_hold(&v(&["/usr/bin/foot"]), &sh("ls"))[..2], v(&["/usr/bin/foot", "--hold"])[..]);
+        // no hold flag: wrapped, the program travels as arguments of the wrapper
+        let w = in_terminal_hold(&v(&["wezterm", "start", "--"]), &sh(nasty));
+        assert_eq!(w[..3], v(&["wezterm", "start", "--"])[..]);
+        assert_eq!(w[3..5], v(&["sh", "-c"])[..]);
+        assert!(w[5].contains("read -r") && !w[5].contains("echo"));
+        assert_eq!(w[6], "ashd-hold");
+        assert_eq!(w[7..], sh(nasty)[..]);
+        assert_eq!(in_terminal_hold(&[], &sh("ls")), sh("ls"));
     }
 
     #[test]

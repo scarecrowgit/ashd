@@ -182,16 +182,27 @@ impl ShellHandle {
         self.0.upgrade().and_then(|s| s.read(cx).modal.clone())
     }
 
-    /// The anchor the open modal was opened with, if `panel` is the open modal.
+    /// The anchor the open modal was opened with, if `panel` is the open modal. While
+    /// `panel` leaves (it was dismissed a moment ago and fades out) this is still the anchor
+    /// it had, so a popup does not jump while it renders its exit.
     pub fn modal_anchor(&self, panel: PanelId, cx: &App) -> Option<ModalAnchor> {
-        self.modal(cx).filter(|m| m.panel == panel).and_then(|m| m.anchor)
+        self.modal(cx)
+            .filter(|m| m.panel == panel)
+            .and_then(|m| m.anchor)
+            .or_else(|| crate::overlay::closing_anchor(panel, cx))
     }
 
-    /// The display the open modal is shown on (or the focused display).
+    /// The display the open modal is shown on (or the one a modal is leaving from, or the
+    /// focused display).
     pub fn modal_display(&self, cx: &App) -> Option<DisplayInfo> {
         let shell = self.0.upgrade()?;
         let shell = shell.read(cx);
-        let id = shell.modal.as_ref().map(|m| m.display).or_else(|| shell.focused_display(cx))?;
+        let id = shell
+            .modal
+            .as_ref()
+            .map(|m| m.display)
+            .or_else(|| crate::overlay::closing_display(cx))
+            .or_else(|| shell.focused_display(cx))?;
         shell.displays.get(&id).map(|d| d.info.clone())
     }
 

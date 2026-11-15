@@ -13,7 +13,7 @@
 //! ```
 
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::{Duration, Instant},
 };
 
@@ -60,11 +60,25 @@ pub fn init_from_env() {
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
     REDUCED_MOTION.store(on, Ordering::Relaxed);
+    let scale = std::env::var("ASHD_MOTION_SCALE").ok().and_then(|v| v.trim().parse::<f32>().ok());
+    if let Some(scale) = scale.filter(|s| (1.0..=100.0).contains(s)) {
+        TIME_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+    }
 }
 
-/// `ms`, or the 80 ms fade under reduced motion.
+/// Slow-motion factor for testing (`ASHD_MOTION_SCALE=8`: every shell tween and spring
+/// takes 8× as long, so a burst of screenshots catches the frames in between). 1 = off.
+static TIME_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000); // 1.0f32
+
+pub fn time_scale() -> f32 {
+    f32::from_bits(TIME_SCALE.load(Ordering::Relaxed))
+}
+
+/// `ms`, or the 80 ms fade under reduced motion (times [`time_scale`]).
 pub fn duration_ms(ms: u64) -> u64 {
-    if reduced_motion() { timing::REDUCED_FADE.min(ms.max(1)) } else { ms }
+    let ms = if reduced_motion() { timing::REDUCED_FADE.min(ms.max(1)) } else { ms };
+    let scale = time_scale();
+    if scale == 1.0 { ms } else { (ms as f32 * scale).round() as u64 }
 }
 
 /// Progress for *movement* (position, scale, size) driven by an animation's `t`: the real
@@ -168,8 +182,42 @@ impl SpringValue {
         *self = Self { spring: self.spring, from: x, to, v0: v, start: now };
     }
 
+    /// Displace the current position by `delta` without touching the velocity or the
+    /// target (layout moves: the element jumped, the spring carries the visual back).
+    pub fn shift_at(&mut self, delta: f32, now: Instant) {
+        if reduced_motion() {
+            let spring = self.spring;
+            *self = Self { spring, from: self.to, to: self.to, v0: 0.0, start: now };
+            return;
+        }
+        let (x, v) = self.state_at(now);
+        *self = Self { spring: self.spring, from: x + delta, to: self.to, v0: v, start: now };
+    }
+
+    /// How long until the value is within `tolerance` (a fraction of the distance moved
+    /// so far, at least 1 unit's worth) of the target for good; at most 1 s.
+    pub fn settle_within(&self, tolerance: f32, now: Instant) -> Duration {
+        let span = (self.from - self.to).abs().max(1.0);
+        let mut t = Duration::ZERO;
+        while t < Duration::from_secs(1) {
+            if (self.value_at(now + t) - self.to).abs() <= span * tolerance {
+                return t;
+            }
+            t += Duration::from_millis(4);
+        }
+        t
+    }
+
     pub fn value_now(&self) -> f32 {
         self.value_at(Instant::now())
+    }
+
+    /// The value to draw now, and whether it is still moving: once the spring is within its
+    /// tolerance the value is the target *exactly* (the last frame must be pixel-exact, a
+    /// 0.3 px leftover shows as a 1 px offset), and the caller stops asking for frames.
+    pub fn drawn_now(&self) -> (f32, bool) {
+        let now = Instant::now();
+        if self.is_settled_at(now) { (self.to, false) } else { (self.value_at(now), true) }
     }
 
     pub fn value_at(&self, now: Instant) -> f32 {
@@ -188,7 +236,7 @@ impl SpringValue {
 
     /// (position, velocity) at `now`.
     fn state_at(&self, now: Instant) -> (f32, f32) {
-        let t = now.saturating_duration_since(self.start).as_secs_f32();
+        let t = now.saturating_duration_since(self.start).as_secs_f32() / time_scale();
         let d0 = self.from - self.to;
         if d0 == 0.0 && self.v0 == 0.0 {
             return (self.to, 0.0);
@@ -241,17 +289,27 @@ fn velocity(s: Spring, d0: f32, v0: f32, t: f32) -> f32 {
     }
 }
 
+/// The reduced-motion flag is process-global: every test (here and in `presence`) that
+/// depends on it takes this lock first.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard};
 
     use super::*;
 
-    /// The reduced-motion flag is process-global; tests that depend on it run one at a time.
-    fn guard() -> MutexGuard<'static, ()> {
+    pub(crate) fn guard() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    pub(crate) fn set_reduced(on: bool) {
+        REDUCED_MOTION.store(on, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_support::guard, *};
 
     #[test]
     fn spring_value_settles_and_retargets() {
@@ -306,6 +364,38 @@ mod tests {
                 assert!((num - ana).abs() < 5e-2 * (1.0 + ana.abs()), "{spring:?} t={t}: {num} vs {ana}");
             }
         }
+    }
+
+    #[test]
+    fn shift_keeps_velocity_and_target() {
+        let _g = guard();
+        let t0 = Instant::now();
+        let mut s = SpringValue::new(0.0, SPRING_VIEW);
+        s.shift_at(40.0, t0); // layout jumped 40 px: the visual starts 40 px off ...
+        s.set_target_at(0.0, t0);
+        assert!((s.value_at(t0) - 40.0).abs() < 1e-3);
+        let mid = s.value_at(t0 + Duration::from_millis(40));
+        assert!(mid > 0.0 && mid < 40.0, "{mid}");
+        // ... a second jump while it moves keeps the speed (position shifts, velocity stays)
+        let v_before = s.state_at(t0 + Duration::from_millis(40)).1;
+        s.shift_at(-10.0, t0 + Duration::from_millis(40));
+        let v_after = s.state_at(t0 + Duration::from_millis(40)).1;
+        assert!((v_before - v_after).abs() < 1e-2, "{v_before} {v_after}");
+        assert!((s.value_at(t0 + Duration::from_millis(40)) - (mid - 10.0)).abs() < 1e-3);
+        assert!(s.is_settled_at(t0 + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn settle_within_is_short_for_the_scratchpad_spring() {
+        let _g = guard();
+        let t0 = Instant::now();
+        let mut s = SpringValue::new(1.0, SPRING_SCRATCHPAD);
+        s.set_target_at(0.0, t0);
+        let wait = s.settle_within(0.005, t0);
+        assert!(wait > Duration::from_millis(100) && wait < Duration::from_millis(500), "{wait:?}");
+        assert!((s.value_at(t0 + wait)).abs() <= 0.005 + 1e-4);
+        // already there: no wait
+        assert_eq!(SpringValue::new(0.0, SPRING_SCRATCHPAD).settle_within(0.005, t0), Duration::ZERO);
     }
 
     #[test]

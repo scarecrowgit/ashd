@@ -23,11 +23,11 @@
 pub mod groups;
 pub mod schedule;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use gpui::{
-    AnimationExt as _, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight, InteractiveElement as _,
+    ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
     Task, Window, div, prelude::*, px,
 };
@@ -36,7 +36,10 @@ use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
 use ashd_svc_notifications::{Notification, Urgency};
 use ashd_tokens::{LayoutVariant, metrics, motion};
 use ashd_ui::{
-    ButtonKind, FieldState, Icon, TextInput, TextInputEvent, anim, button_small, field, icon, icon_button_sized, label,
+    ButtonKind, FieldState, Icon, TextInput, TextInputEvent, anim, button_small, field, flip, hover_wash, icon,
+    icon_button_sized, label,
+    presence::{Presence, PresenceList, Timing},
+    reveal,
     progress, theme, toggle,
 };
 
@@ -58,6 +61,8 @@ pub struct NotificationCenterPanelState {
     pub schedule: Schedule,
     /// The schedule editor under the DND row is expanded.
     schedule_open: bool,
+    /// ... and how far it has opened (it unfolds and folds over 140 ms).
+    schedule_view: Presence,
     /// What the schedule last asked for (`None` = disabled / not evaluated yet).
     applied: Option<bool>,
     /// The once-a-minute schedule timer.
@@ -67,6 +72,24 @@ pub struct NotificationCenterPanelState {
     /// The one inline-reply field, shown under the notification `reply_for`.
     reply: Entity<TextInput>,
     reply_for: Option<u32>,
+    /// The rows as drawn: a dismissed notification fades out before the rest closes up,
+    /// a new one fades in. Rebuilt at every opening (what was there is not "new").
+    items: PresenceList<u32, Notification>,
+}
+
+fn page_in() -> Timing {
+    Timing::new(motion::timing::PAGE, anim::EASE_OUT_EXPO)
+}
+
+fn page_out() -> Timing {
+    Timing::new(motion::timing::ITEM_OUT, anim::EASE_OUT_QUAD)
+}
+
+fn item_presence() -> PresenceList<u32, Notification> {
+    PresenceList::new(
+        Timing::new(motion::timing::ITEM_IN, anim::EASE_OUT_EXPO),
+        Timing::new(motion::timing::ITEM_OUT, anim::EASE_OUT_QUAD),
+    )
 }
 
 pub struct NotificationCenterPanel {
@@ -217,11 +240,13 @@ impl Panel for NotificationCenterPanel {
             focus: cx.focus_handle(),
             schedule: Schedule::default(),
             schedule_open: false,
+            schedule_view: Presence::absent(page_in(), page_out(), Instant::now()),
             applied: None,
             timer: None,
             ticker: None,
             reply,
             reply_for: None,
+            items: item_presence(),
         };
         // The schedule is read off the main thread; the timer starts once it is known.
         let path = schedule::path();
@@ -255,6 +280,8 @@ impl Panel for NotificationCenterPanel {
 
     fn on_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.focus.focus(window, cx);
+        self.state.items = item_presence();
+        self.state.schedule_view = Presence::absent(page_in(), page_out(), Instant::now());
         self.state.ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AGE_REFRESH).await;
@@ -268,6 +295,7 @@ impl Panel for NotificationCenterPanel {
     fn on_close(&mut self, cx: &mut Context<Self>) {
         self.state.ticker = None;
         self.state.schedule_open = false;
+        self.state.schedule_view = Presence::absent(page_in(), page_out(), Instant::now());
         self.state.reply_for = None;
         cx.notify();
     }
@@ -378,6 +406,7 @@ impl NotificationCenterPanel {
                     .child(label(self.dnd_subtitle(dnd), cx))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.state.schedule_open = !this.state.schedule_open;
+                        this.state.schedule_view.set_present(this.state.schedule_open, Instant::now());
                         cx.notify();
                     })),
             )
@@ -391,9 +420,13 @@ impl NotificationCenterPanel {
                 cx,
             ));
         let mut row = div().mt(px(8.)).border_1().border_color(t.line).rounded(t.radius_control).child(top);
-        if self.state.schedule_open {
-            row = row.child(
+        let now = Instant::now();
+        let view = self.state.schedule_view;
+        if !view.is_gone(now) {
+            let (fade, open) = (view.value(now), view.movement(now));
+            let editor = {
                 div()
+                    .opacity(fade)
                     .p(px(10.))
                     .border_t_1()
                     .border_color(t.line)
@@ -435,14 +468,15 @@ impl NotificationCenterPanel {
                                 cx,
                             ))
                             .child(self.time_stepper("nc-to", "to", schedule.end, |s, d| s.end = s.end.shifted(d), cx)),
-                    ),
-            );
+                    )
+            };
+            row = row.child(reveal("nc-schedule-reveal", open, move |_| editor));
         }
         row
     }
 
     /// One notification: title + age (a close button on hover), body, progress, actions.
-    fn item(&self, n: &Notification, first: bool, now: chrono::DateTime<Local>, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn item(&self, n: &Notification, first: bool, fade: f32, alive: bool, now: chrono::DateTime<Local>, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx).clone();
         let id = n.id;
         let critical = n.urgency == Urgency::Critical;
@@ -469,7 +503,7 @@ impl NotificationCenterPanel {
                     .opacity(0.)
                     .group_hover(group.clone(), |s| s.opacity(1.))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(t.line))
+                    .child(hover_wash(t.line, None, t.radius_control))
                     .child(icon(Icon::Close, 11.).text_color(t.fg_muted))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -487,8 +521,9 @@ impl NotificationCenterPanel {
             .py(px(8.))
             .rounded(t.radius_control)
             .when(first, |d| d.bg(s2))
-            .when(!first, |d| d.hover(move |s| s.bg(s2)))
+            .when(!first, |d| d.child(hover_wash(s2, None, t.radius_control)))
             .when(critical, |d| d.border_l_2().border_color(t.err))
+            .opacity(fade)
             .cursor_pointer()
             .child(
                 div()
@@ -588,10 +623,15 @@ impl NotificationCenterPanel {
             );
         }
         let n = n.clone();
-        el.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.activate(&n, cx)))
+        el.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            // A row that is fading out is already gone.
+            if alive {
+                this.activate(&n, cx)
+            }
+        }))
     }
 
-    fn group(&self, ix: usize, group: &Group, last: bool, now: chrono::DateTime<Local>, cx: &mut Context<Self>) -> Div {
+    fn group(&self, ix: usize, group: &Group, last: bool, fades: &std::collections::HashMap<u32, (f32, bool)>, now: chrono::DateTime<Local>, cx: &mut Context<Self>) -> Div {
         let t = theme(cx).clone();
         let ids: Vec<u32> = group.items.iter().map(|n| n.id).collect();
         let title = group.title().to_string();
@@ -614,10 +654,7 @@ impl NotificationCenterPanel {
                     .size(px(20.))
                     .rounded(t.radius_control)
                     .cursor_pointer()
-                    .hover({
-                        let s2 = t.surface_2;
-                        move |s| s.bg(s2)
-                    })
+                    .child(hover_wash(t.surface_2, None, t.radius_control))
                     .child(icon(Icon::Trash, 13.).text_color(t.fg_muted))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.clear_group(&ids, cx))),
             );
@@ -626,19 +663,31 @@ impl NotificationCenterPanel {
             col = col.border_b_1().border_color(t.line);
         }
         for (i, n) in group.items.iter().enumerate() {
-            col = col.child(self.item(n, i == 0, now, cx));
+            let (fade, alive) = fades.get(&n.id).copied().unwrap_or((1.0, true));
+            // The rows below glide up when this one is gone.
+            col = col.child(flip(ElementId::from(("nc-flip", n.id)), self.item(n, i == 0, fade, alive, now, cx)));
         }
         col
     }
 }
 
 impl Render for NotificationCenterPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let st = self.ctx.services.notifications.state.read(cx).clone();
         let dnd = st.dnd;
-        let groups = group_by_app(&st.notifications);
-        let empty = groups.is_empty();
+        let tick = Instant::now();
+        self.state.items.sync(tick, st.notifications.iter().map(|n| (n.id, n.clone())));
+        if self.state.items.is_animating(tick) || self.state.schedule_view.is_animating(tick) {
+            window.request_animation_frame();
+        }
+        // Present and still-leaving rows (the latter fade out in place).
+        let shown: Vec<_> = self.state.items.entries(tick).to_vec();
+        let fades: std::collections::HashMap<u32, (f32, bool)> =
+            shown.iter().map(|e| (e.key, (e.presence.value(tick), e.is_present()))).collect();
+        let displayed: Vec<Notification> = shown.iter().map(|e| e.value.clone()).collect();
+        let groups = group_by_app(&displayed);
+        let empty = st.notifications.is_empty() && displayed.is_empty();
         let now = Local::now();
 
         // ── placement: bottom = bar_h + POPUP_GAP, right edge on the bell ──
@@ -670,7 +719,7 @@ impl Render for NotificationCenterPanel {
             let count = groups.len();
             let mut col = div().px(px(16.)).pb(px(4.)).flex().flex_col();
             for (ix, g) in groups.iter().enumerate() {
-                col = col.child(self.group(ix, g, ix + 1 == count, now, cx));
+                col = col.child(flip(SharedString::from(format!("nc-group-{}", g.title())), self.group(ix, g, ix + 1 == count, &fades, now, cx)));
             }
             div().id("nc-list").min_h(px(0.)).overflow_y_scroll().child(col).into_any_element()
         };
@@ -700,12 +749,7 @@ impl Render for NotificationCenterPanel {
                     .child(self.header(empty, cx))
                     .child(self.dnd_row(dnd, cx)),
             )
-            .child(list)
-            .with_animation(
-                "nc-in",
-                anim::tween(motion::timing::SUBMENU_IN, anim::EASE_STANDARD),
-                |el, d| el.opacity(d),
-            );
+            .child(list);
         div().size_full().relative().child(panel)
     }
 }

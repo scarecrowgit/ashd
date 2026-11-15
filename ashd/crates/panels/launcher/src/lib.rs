@@ -3,8 +3,14 @@
 //! prefix selected). Enter acts on the selected row (spawns go through niri), Shift+Enter is
 //! the alternate action, Escape / outside click closes.
 //!
+//! Commands (the `>` mode, and a "Run …" row for a query that matches no application):
+//! Enter runs the line here and shows its stdout / stderr under the input (`runner.rs`,
+//! `sh -lc`, killed when the launcher closes); Ctrl+Enter runs it in the configured
+//! terminal, which stays open (`kitty --hold sh -lc …`); Shift+Enter runs it detached and
+//! silent through niri.
+//!
 //! Owner: launcher. Layout: `view.rs`; result rows per mode: `rows.rs`; pure helpers:
-//! `model.rs`, `calc.rs`, `files.rs`, `emoji.rs`, `history.rs`.
+//! `model.rs`, `calc.rs`, `files.rs`, `emoji.rs`, `history.rs`, `runner.rs`.
 
 mod calc;
 mod emoji;
@@ -12,12 +18,16 @@ mod files;
 mod history;
 mod model;
 mod rows;
+mod runner;
 mod view;
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    AppContext as _, Context, Entity, Focusable as _, KeyBinding, Window, actions,
+    AppContext as _, ClipboardItem, Context, Entity, Focusable as _, KeyBinding, Task, Window, actions,
 };
 use nucleo_matcher::Matcher;
 use ashd_ipc::{LauncherMode, PanelOp, Request, Response};
@@ -27,11 +37,51 @@ use ashd_ui::{TextInput, TextInputEvent};
 
 use calc::{Calc, CalcOut};
 use files::FileResults;
-use model::{Act, MAX_VISIBLE, Row, mode_for_prefix, placeholder, plan_run};
+use model::{Act, MAX_VISIBLE, Row, mode_for_prefix, placeholder, plan_run, terminal_run_argv};
+use runner::{Exit, Msg, OutputBuf};
 
-actions!(launcher, [AltSubmit, ExitMode, SelectNext, SelectPrev]);
+actions!(launcher, [AltSubmit, CtrlSubmit, ExitMode, SelectNext, SelectPrev, CopyOutput]);
 
 const FILE_DEBOUNCE: Duration = Duration::from_millis(140);
+
+/// Which of the three submit keys was pressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Submit {
+    /// Enter.
+    Primary,
+    /// Shift+Enter.
+    Alt,
+    /// Ctrl+Enter.
+    Ctrl,
+}
+
+/// How the command being shown ended.
+pub(crate) enum RunStatus {
+    Running,
+    Done { exit: Exit, took: Duration },
+    /// The shell could not be started.
+    Failed(String),
+}
+
+/// A command run inside the launcher and what it printed.
+pub(crate) struct RunView {
+    pub command: String,
+    pub buf: OutputBuf,
+    pub status: RunStatus,
+    pub started: Instant,
+    /// First visible output line; `follow` keeps it at the end while the output grows.
+    pub scroll: usize,
+    pub follow: bool,
+    handle: runner::Handle,
+    _reader: Task<()>,
+    _tick: Task<()>,
+}
+
+impl RunView {
+    pub fn max_scroll(&self) -> usize {
+        self.buf.visible_len().saturating_sub(view::OUT_LINES)
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct FilesState {
@@ -56,6 +106,8 @@ pub struct LauncherPanel {
     pub(crate) calc: Calc,
     pub(crate) calc_out: CalcOut,
     pub(crate) files: FilesState,
+    /// The command whose output is on screen.
+    pub(crate) run: Option<RunView>,
     /// `>` history, newest first (loaded on open).
     pub(crate) run_history: Vec<(String, u64)>,
     pub(crate) recent_emoji: Vec<String>,
@@ -86,6 +138,9 @@ impl Panel for LauncherPanel {
         .detach();
         cx.bind_keys([
             KeyBinding::new("shift-enter", AltSubmit, Some("Launcher")),
+            KeyBinding::new("ctrl-enter", CtrlSubmit, Some("Launcher")),
+            // over the input's own copy: the output is copied unless the input has a selection
+            KeyBinding::new("ctrl-c", CopyOutput, Some("LauncherOutput > TextInput")),
             KeyBinding::new("backspace", ExitMode, Some("LauncherEmpty > TextInput")),
             KeyBinding::new("ctrl-n", SelectNext, Some("Launcher")),
             KeyBinding::new("ctrl-j", SelectNext, Some("Launcher")),
@@ -116,6 +171,7 @@ impl Panel for LauncherPanel {
             calc: Calc::new(),
             calc_out: CalcOut::Empty,
             files: FilesState::default(),
+            run: None,
             run_history: Vec::new(),
             recent_emoji: Vec::new(),
             terminal: vec!["xterm".into(), "-e".into()],
@@ -162,6 +218,7 @@ impl Panel for LauncherPanel {
     }
 
     fn on_close(&mut self, cx: &mut Context<Self>) {
+        self.stop_run();
         self.open = false;
         self.mode = None;
         self.input.update(cx, |i, cx| {
@@ -185,8 +242,10 @@ impl LauncherPanel {
     fn on_input_event(&mut self, ev: &TextInputEvent, cx: &mut Context<Self>) {
         match ev {
             TextInputEvent::Changed => self.on_changed(cx),
-            TextInputEvent::Submit => self.activate(false, cx),
+            TextInputEvent::Submit => self.activate(Submit::Primary, cx),
             TextInputEvent::Cancel => self.ctx.shell.close_modal(cx),
+            TextInputEvent::Up if self.run.is_some() => self.scroll_output(-3, cx),
+            TextInputEvent::Down | TextInputEvent::Tab if self.run.is_some() => self.scroll_output(3, cx),
             TextInputEvent::Up => self.move_selection(-1, cx),
             TextInputEvent::Down | TextInputEvent::Tab => self.move_selection(1, cx),
             TextInputEvent::Blur => {}
@@ -194,6 +253,8 @@ impl LauncherPanel {
     }
 
     fn on_changed(&mut self, cx: &mut Context<Self>) {
+        // editing the line leaves the output (and ends a command still running)
+        self.stop_run();
         let text = self.query(cx);
         if self.mode.is_none()
             && let Some(first) = text.chars().next()
@@ -209,6 +270,7 @@ impl LauncherPanel {
     }
 
     pub(crate) fn set_mode(&mut self, mode: Option<LauncherMode>, text: String, cx: &mut Context<Self>) {
+        self.stop_run();
         self.mode = mode;
         self.input.update(cx, |i, cx| {
             i.set_text(text, cx);
@@ -316,29 +378,25 @@ impl LauncherPanel {
             .unwrap_or_else(|| self.terminal.clone())
     }
 
-    /// Enter (`alt = false`) or Shift+Enter on the selected row.
-    pub(crate) fn activate(&mut self, alt: bool, cx: &mut Context<Self>) {
+    /// Enter, Shift+Enter or Ctrl+Enter on the selected row (or, while a command's output
+    /// is shown, on that command).
+    pub(crate) fn activate(&mut self, key: Submit, cx: &mut Context<Self>) {
         if self.mode == Some(LauncherMode::Calc) {
-            return self.activate_calc(alt, cx);
+            return self.activate_calc(key == Submit::Alt, cx);
         }
-        let act = match self.rows.get(self.selected) {
-            Some(row) if alt => row.alt.clone().unwrap_or_else(|| row.primary.clone()),
-            Some(row) => row.primary.clone(),
-            None => {
-                // no-results state: run the query as a command, or search the web
-                let q = self.query(cx);
-                let q = q.trim();
-                if q.is_empty() {
-                    return;
-                }
-                match (self.mode, alt) {
-                    (None, false) | (Some(LauncherMode::Run), _) => Act::Run(q.to_string()),
-                    (None, true) => match model::web_targets(q, None).into_iter().next() {
-                        Some((_, url, _)) => Act::Spawn(vec!["xdg-open".into(), url]),
-                        None => return,
-                    },
-                    _ => return,
-                }
+        let act = if let Some(run) = &self.run {
+            let line = run.command.clone();
+            match key {
+                Submit::Primary => Act::Run(line),
+                Submit::Alt => Act::RunDetached(line),
+                Submit::Ctrl => Act::RunInTerminal(line),
+            }
+        } else {
+            let Some(row) = self.rows.get(self.selected) else { return };
+            match key {
+                Submit::Primary => row.primary.clone(),
+                Submit::Alt => row.alt.clone().unwrap_or_else(|| row.primary.clone()),
+                Submit::Ctrl => row.ctrl.clone().unwrap_or_else(|| row.primary.clone()),
             }
         };
         self.exec(act, cx);
@@ -366,8 +424,13 @@ impl LauncherPanel {
             }
             Act::FocusWindow(id) => self.ctx.shell.niri_action(Action::FocusWindow { id }, cx),
             Act::Spawn(argv) => self.ctx.shell.spawn(argv, cx),
-            Act::Run(line) | Act::RunInTerminal(line) if line.trim().is_empty() => return,
+            Act::Run(line) | Act::RunDetached(line) | Act::RunInTerminal(line) if line.trim().is_empty() => return,
             Act::Run(line) => {
+                // the launcher stays open: the output is shown under the input
+                self.start_run(line, cx);
+                return;
+            }
+            Act::RunDetached(line) => {
                 let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "sh".into());
                 if let Some(argv) = plan_run(&line, &shell) {
                     self.ctx.shell.spawn(argv, cx);
@@ -375,11 +438,8 @@ impl LauncherPanel {
                 }
             }
             Act::RunInTerminal(line) => {
-                let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "sh".into());
-                if let Some(argv) = plan_run(&line, &shell) {
-                    let mut full = self.terminal_prefix(cx);
-                    full.extend(argv);
-                    self.ctx.shell.spawn(full, cx);
+                if let Some(argv) = terminal_run_argv(&self.terminal_prefix(cx), &line) {
+                    self.ctx.shell.spawn(argv, cx);
                     self.remember_run(&line, cx);
                 }
             }
@@ -393,6 +453,106 @@ impl LauncherPanel {
             }
         }
         self.ctx.shell.close_modal(cx);
+    }
+
+    /// Run `line` here: replaces the output on screen (and ends the command behind it).
+    fn start_run(&mut self, line: String, cx: &mut Context<Self>) {
+        self.stop_run();
+        let command = line.trim().to_string();
+        self.remember_run(&command, cx);
+        let run = runner::spawn(&command);
+        let rx = run.rx;
+        let reader = cx.spawn(async move |this, cx| {
+            while let Ok(first) = rx.recv().await {
+                // take what is already there in one update
+                let mut batch = vec![first];
+                while batch.len() < 64 && let Ok(m) = rx.try_recv() {
+                    batch.push(m);
+                }
+                let done = batch.iter().any(|m| matches!(m, Msg::Done(_)));
+                if this.update(cx, |this, cx| this.on_run_msgs(batch, cx)).is_err() || done {
+                    break;
+                }
+            }
+        });
+        // the elapsed time of a running command
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let running = this.update(cx, |this, cx| {
+                    let running = this.run.as_ref().is_some_and(|r| matches!(r.status, RunStatus::Running));
+                    if running {
+                        cx.notify();
+                    }
+                    running
+                });
+                if !running.unwrap_or(false) {
+                    break;
+                }
+            }
+        });
+        self.run = Some(RunView {
+            command,
+            buf: OutputBuf::new(),
+            status: RunStatus::Running,
+            started: Instant::now(),
+            scroll: 0,
+            follow: true,
+            handle: run.handle,
+            _reader: reader,
+            _tick: tick,
+        });
+        cx.notify();
+    }
+
+    fn on_run_msgs(&mut self, msgs: Vec<Msg>, cx: &mut Context<Self>) {
+        let Some(run) = self.run.as_mut() else { return };
+        for m in msgs {
+            match m {
+                Msg::Chunk(stream, bytes) => run.buf.push(stream, &bytes),
+                Msg::Done(result) => {
+                    run.buf.flush();
+                    run.status = match result {
+                        Ok((exit, took)) => RunStatus::Done { exit, took },
+                        Err(e) => RunStatus::Failed(e),
+                    };
+                }
+            }
+        }
+        if run.follow {
+            run.scroll = run.max_scroll();
+        }
+        cx.notify();
+    }
+
+    /// Forget the command on screen; a command still running is stopped.
+    pub(crate) fn stop_run(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.handle.kill();
+        }
+    }
+
+    /// Scroll the output by `lines` (positive = down); reaching the end follows it again.
+    pub(crate) fn scroll_output(&mut self, lines: isize, cx: &mut Context<Self>) {
+        let Some(run) = self.run.as_mut() else { return };
+        let max = run.max_scroll();
+        let next = (run.scroll as isize + lines).clamp(0, max as isize) as usize;
+        run.follow = next == max;
+        if next != run.scroll {
+            run.scroll = next;
+            cx.notify();
+        }
+    }
+
+    /// Ctrl+C in the input: put the output on the clipboard, then let the input's own copy
+    /// run (it replaces it when the input has a selection).
+    pub(crate) fn copy_output(&mut self, cx: &mut Context<Self>) {
+        if let Some(run) = &self.run
+            && !run.buf.is_empty()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(run.buf.text()));
+        }
+        cx.propagate();
     }
 
     fn remember_run(&mut self, line: &str, cx: &mut Context<Self>) {

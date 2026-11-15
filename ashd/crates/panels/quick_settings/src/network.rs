@@ -20,7 +20,7 @@ use ashd_svc_network::{
     IfKind, Interface, LinkStatus, NetworkState, Profile, ProfileKind, StaticConfig, StepStatus, Vpn, fmt, nm::parse_cidr,
 };
 use ashd_tokens::metrics;
-use ashd_ui::{Icon, TextInput, TextInputEvent, icon, label, theme};
+use ashd_ui::{Icon, TextInput, TextInputEvent, hover_wash, icon, label, theme};
 
 use crate::{QuickSettingsPanel, sparkline, tile};
 
@@ -45,6 +45,10 @@ pub(crate) struct Editor {
 #[derive(Default)]
 pub(crate) struct ConnState {
     pub section: Option<ConnSection>,
+    /// The section that was just closed and is folding away (it keeps being built).
+    pub closing: Option<ConnSection>,
+    /// How far the section has unfolded (`crate::fold`).
+    pub view: Option<ashd_ui::presence::Presence>,
     /// Sparkline scale, latched per view.
     pub scale: Option<f32>,
     /// SSID whose inline password field is open.
@@ -267,7 +271,7 @@ pub(crate) fn small_button(id: impl Into<ElementId>, text: &str, primary: bool, 
         .border_color(border)
         .rounded(t.radius_control)
         .when_some(bg, |d, c| d.bg(c))
-        .when(bg.is_none(), |d| d.hover(move |s| s.bg(s2)))
+        .when(bg.is_none(), |d| d.child(hover_wash(s2, None, t.radius_control)))
         .cursor_pointer()
         .font_family(t.font_sans.clone())
         .text_size(px(11.5))
@@ -290,7 +294,7 @@ pub(crate) fn tiny_icon_button(id: impl Into<ElementId>, ic: Icon, color: gpui::
         .justify_center()
         .rounded(t.radius_control)
         .cursor_pointer()
-        .hover(move |s| s.bg(s2))
+        .child(hover_wash(s2, None, t.radius_control))
         .child(icon(ic, 12.).text_color(color))
 }
 
@@ -331,6 +335,24 @@ impl QuickSettingsPanel {
         let cs = &mut self.state.conn;
         let previous = cs.section;
         cs.section = section;
+        // Folding: a section that closes folds away; one that replaces another unfolds
+        // from nothing (the old one is gone at once).
+        let now = Instant::now();
+        match (previous, section) {
+            (Some(p), None) => {
+                cs.closing = Some(p);
+                crate::fold::set(&mut cs.view, false, now);
+            }
+            (prev, Some(s)) => {
+                // Opened again while it was still folding away: turn around from there.
+                if !(prev.is_none() && cs.closing == Some(s) && cs.view.is_some()) {
+                    cs.view = None;
+                }
+                cs.closing = None;
+                crate::fold::set(&mut cs.view, true, now);
+            }
+            (None, None) => {}
+        }
         cs.scale = None;
         cs.wifi_pick = None;
         cs.editor = None;
@@ -476,11 +498,20 @@ impl QuickSettingsPanel {
     /// The expanded section below the tile grid (network / Wi-Fi / Bluetooth) with the VPN
     /// rows under the network ones.
     pub(crate) fn connectivity_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        match self.state.conn.section? {
+        let now = Instant::now();
+        let open = self.state.conn.section.is_some();
+        if !crate::fold::alive(open, &self.state.conn.view, now) {
+            self.state.conn.closing = None;
+            return None;
+        }
+        let which = self.state.conn.section.or(self.state.conn.closing)?;
+        let content = match which {
             ConnSection::Network => self.network_section(window, cx),
             ConnSection::Wifi => self.wifi_section(window, cx),
             ConnSection::Bluetooth => self.bluetooth_section(window, cx),
-        }
+        }?;
+        let (unfold, fade) = crate::fold::progress(&self.state.conn.view, now);
+        Some(div().child(ashd_ui::reveal("qs-conn-reveal", unfold, move |_| content.opacity(fade))))
     }
 
     fn network_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
@@ -648,7 +679,7 @@ impl QuickSettingsPanel {
                     .border_color(if p.active { t.accent } else { gpui::transparent_black() })
                     .rounded(t.radius_control)
                     .cursor_pointer()
-                    .when(!p.active, |d| d.hover(move |s| s.bg(s2)))
+                    .when(!p.active, |d| d.child(hover_wash(s2, None, t.radius_control)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, _| this.ctx.services.network.handle.activate_profile(&uuid)))
                     .child(
                         div()

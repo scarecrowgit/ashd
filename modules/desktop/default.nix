@@ -36,6 +36,16 @@ in
 
     shell = {
       enable = mkEnableOption "the ashd shell (ashd-shell service, ashd CLI binds, lock screen)";
+
+      reduceMotion = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          The shell's one motion switch (`reduceMotion` in /etc/ashd/shell.json): movement
+          happens at once and only short fades remain. The compositor's own animations are
+          not affected.
+        '';
+      };
     };
 
     package = mkOption {
@@ -118,16 +128,18 @@ in
 
     layout.topStrut = mkOption {
       type = types.numbers.nonnegative;
-      default = 30;
+      default = 39;
       example = 0;
       description = ''
         Space (logical px) reserved at the top of the working area for the shell's strip
         header. Written as `struts { top }` in the static niri config, which is what applies
         until the first `ashd theme apply` has written the generated theme fragment. Once a
         fragment exists it decides the top strut: ashd-tokens' `niri_kdl` writes
-        `struts { top }` for every theme (30 px for the header, plus the theme gap under the
-        floating themes Ink, Midnight, Moss and Dusk, which start the main area one gap
-        below the screen edge), and this option has no effect any more. Set it to 0 only
+        `struts { top }` for every theme (39 px for the header and the focus ring of the
+        topmost windows under Ash; the floating themes Ink, Midnight, Moss and Dusk, which
+        start the main area one gap below the screen edge, reserve 34 px plus two theme
+        gaps so the header clears the work-area outline by one gap), and this option has no
+        effect any more. Set it to 0 only
         without the shell.
       '';
     };

@@ -1,8 +1,8 @@
 //! Bottom row (desk-05 `top 1034, 1920 × 46`), two panels of this crate (the dock in the
 //! middle is `ashd-panel-dock`):
 //!
-//! - [`BarPanel`] (`Slot::BarStart`, STATUS_W 560): clock + date, cpu/mem meters, the
-//!   network + volume control, battery (if any), keyboard layout chip, bell. Controls
+//! - [`BarPanel`] (`Slot::BarStart`, `STATUS_W` 560 at most, hugging its content): clock + date,
+//!   cpu/mem meters, the network + volume control, battery (if any), keyboard layout chip, bell. Controls
 //!   open popups owned by other panels through `ShellHandle::request` with their own
 //!   bounds as anchor (`DisplayInfo::bar_to_output`), and show the "open" look
 //!   (surface-2 + 2px accent underline) while their popup is the open modal.
@@ -12,6 +12,7 @@
 //! Owner: shell frame.
 
 mod end;
+mod fixture;
 mod nowplaying;
 pub mod geom;
 mod status;
@@ -113,14 +114,35 @@ pub(crate) fn is_open(panel: PanelId, ctx: &PanelContext, cx: &App) -> bool {
     m.panel == panel && ctx.display.as_ref().is_none_or(|d| d.id == m.display)
 }
 
-/// The "my popup is open" look: surface-2 background + 2px accent underline.
-pub(crate) fn open_look<E: gpui::Styled + gpui::ParentElement>(el: E, open: bool, t: &Theme) -> E {
-    if !open {
-        return el;
-    }
-    el.bg(t.surface_2).child(
-        div().absolute().left_0().right_0().bottom_0().h(px(geom::UNDERLINE_H)).bg(t.accent),
+/// The "my popup is open" look: surface-2 background + 2px accent underline, fading in and
+/// out (120 ms) with the popup. A layer under the control's content: add it as the *first
+/// child* of a control that has an element id.
+pub(crate) fn open_layer(open: bool, t: &Theme) -> ashd_ui::Follow<Div> {
+    let (s2, accent, radius) = (t.surface_2, t.accent, t.radius_control);
+    ashd_ui::follow(
+        "open-look",
+        if open { 1.0 } else { 0.0 },
+        ashd_ui::presence::Timing::new(ashd_ui::anim::motion::timing::SWAP, ashd_ui::anim::EASE_STANDARD),
+        move |p| {
+            let clear = gpui::transparent_black();
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(radius)
+                .bg(ashd_ui::mix(clear, s2, p))
+                .child(
+                    div().absolute().left_0().right_0().bottom_0().h(px(geom::UNDERLINE_H)).bg(ashd_ui::mix(clear, accent, p)),
+                )
+        },
     )
+    .fade()
+}
+
+/// Hover fill of a bar control (not while its own popup is open: the open layer has it).
+pub(crate) fn hover_layer(t: &Theme) -> ashd_ui::HoverWash {
+    ashd_ui::hover_wash(t.surface_2, None, t.radius_control)
 }
 
 /// Mono label text (labels, values) at `size`: caps, or as written in themes without
@@ -134,6 +156,12 @@ pub(crate) fn caps(text: impl Into<SharedString>, size: f32, color: Hsla, t: &Th
         .line_height(px((size * 1.3).round()))
         .text_color(color)
         .child(t.label_text(&text))
+}
+
+/// A numeric readout: mono text right-aligned in a slot as wide as its widest value
+/// (`chars` characters), so digits appearing or disappearing move nothing.
+pub(crate) fn slot(text: impl Into<SharedString>, chars: usize, size: f32, color: Hsla, t: &Theme) -> Div {
+    caps(text, size, color, t).min_w(px(geom::slot_w(chars, size))).flex().justify_end()
 }
 
 /// 1×22 vertical separator.

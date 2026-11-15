@@ -1,19 +1,18 @@
 //! Layout of the cheatsheet (docs/design/pages/det-11-calendar-media-alt-tab-cheatsheet.html):
-//! padding 20, gap 16; header = "Keys" 15/600, filter 240×30, Scroll/Canvas control;
+//! padding 20, gap 16; header = "Keys" 15/600, filter 240×30 (the mockup's Scroll/Canvas
+//! control is gone: the sheet shows both modes, split rows carry a line per mode);
 //! grid = 3 columns (gap 32 between, 20 between sections); section title mono 10 CAPS in
 //! the accent; rows 26 high, label sans 12.5 muted, key chips gap 3.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, size,
 };
-use ashd_tokens::WindowMode;
 use ashd_ui::{Icon, Theme, empty_state, icon, keycap, overlay_panel, theme};
 
 use crate::{
     CheatsheetPanel, Load,
-    keys::{self, ROW_H, Row, Section},
+    keys::{self, Modes, Row, Section},
 };
 
 /// Panel width. The mock's panel is 724 wide for its short labels; the project's real binds
@@ -64,7 +63,7 @@ impl Render for CheatsheetPanel {
                 .gap(px(16.))
                 .font_family(t.font_sans.clone())
                 .text_color(t.fg)
-                .child(self.header(&t, cx))
+                .child(self.header(&t))
                 .child(
                     div()
                         .id("cheatsheet-body")
@@ -79,7 +78,7 @@ impl Render for CheatsheetPanel {
 }
 
 impl CheatsheetPanel {
-    fn header(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+    fn header(&self, t: &Theme) -> Div {
         let field = div()
             .h(px(30.))
             .w(px(240.))
@@ -109,51 +108,17 @@ impl CheatsheetPanel {
             )
             .child(div().flex_1())
             .child(field)
-            .child(self.mode_control(t, cx))
     }
 
-    /// Height of the tallest column with no filter applied (current mode).
+    /// Height of the tallest column with no filter applied.
     fn unfiltered_height(&self, columns: usize) -> f32 {
         let Load::Ready(sections) = &self.load else { return 0.0 };
-        let all = keys::visible(sections, self.mode, "");
-        let heights: Vec<f32> = all.iter().map(|(_, rows)| keys::section_height(rows.len())).collect();
+        let all = keys::visible(sections, "");
+        let heights: Vec<f32> = all.iter().map(|(_, rows)| keys::section_height(rows)).collect();
         keys::masonry(&heights, columns)
             .iter()
             .map(|col| col.iter().map(|&i| heights[i]).sum::<f32>() + 20.0 * col.len().saturating_sub(1) as f32)
             .fold(0.0, f32::max)
-    }
-
-    /// Scroll / Canvas: 2 px padding and gap, 24 high segments, the active one in the accent.
-    fn mode_control(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let seg = |ix: u32, name: &'static str, mode: WindowMode, cx: &mut Context<Self>| {
-            let active = self.mode == mode;
-            let hover = t.surface_2;
-            div()
-                .id(("cheatsheet-mode", ix))
-                .h(px(24.))
-                .px(px(10.))
-                .flex()
-                .items_center()
-                .rounded(t.radius_control)
-                .cursor_pointer()
-                .font_family(t.font_sans.clone())
-                .text_size(px(11.5))
-                .font_weight(FontWeight::MEDIUM)
-                .when(active, |d| d.bg(t.accent).text_color(t.on_accent))
-                .when(!active, |d| d.text_color(t.fg_muted).hover(move |s| s.bg(hover)))
-                .child(name)
-                .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)))
-        };
-        div()
-            .flex()
-            .flex_none()
-            .gap(px(2.))
-            .p(px(2.))
-            .border_1()
-            .border_color(t.line)
-            .rounded(t.radius_control)
-            .child(seg(0, "Scroll", WindowMode::Scroll, cx))
-            .child(seg(1, "Canvas", WindowMode::Canvas, cx))
     }
 
     fn body(&self, t: &Theme, columns: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -176,7 +141,7 @@ impl CheatsheetPanel {
             }
             Load::Ready(sections) => {
                 let query = self.query(cx);
-                let visible = keys::visible(sections, self.mode, &query);
+                let visible = keys::visible(sections, &query);
                 if visible.is_empty() {
                     let (title, hint) = if query.trim().is_empty() {
                         ("No keybinds".to_string(), format!("{} has no entries.", self.path.display()))
@@ -185,7 +150,7 @@ impl CheatsheetPanel {
                     };
                     return empty(Icon::Search, &title, hint, cx);
                 }
-                let heights: Vec<f32> = visible.iter().map(|(_, rows)| keys::section_height(rows.len())).collect();
+                let heights: Vec<f32> = visible.iter().map(|(_, rows)| keys::section_height(rows)).collect();
                 let cols = keys::masonry(&heights, columns);
                 div()
                     .flex()
@@ -225,6 +190,28 @@ fn section_view(section: &Section, rows: &[&Row], t: &Theme, cx: &gpui::App) -> 
         .children(rows.iter().map(|row| row_view(row, t, cx)))
 }
 
+/// The mode tag in front of a line of a mode-dependent row: `CANVAS` / `STRIP`, mono 8.5
+/// caps in a fixed slot so the labels of both lines start at the same x.
+fn mode_tag(text: &'static str, t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .w(px(MODE_TAG_W))
+        .h(px(14.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(t.line)
+        .rounded(t.radius_control)
+        .font_family(t.font_mono.clone())
+        .text_size(px(8.5))
+        .text_color(t.fg_muted)
+        .child(text)
+}
+
+/// Width of the mode tag slot.
+const MODE_TAG_W: f32 = 44.0;
+
 fn row_view(row: &Row, t: &Theme, cx: &gpui::App) -> Div {
     let mut chips = div().flex().flex_none().items_center().gap(px(3.));
     for (ix, combo) in row.combos.iter().enumerate() {
@@ -240,19 +227,30 @@ fn row_view(row: &Row, t: &Theme, cx: &gpui::App) -> Div {
         }
         chips = chips.children(combo.iter().map(|key| keycap(SharedString::from(key.clone()), cx)));
     }
+    let line = |tag: Option<&'static str>, text: &str, color| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .children(tag.map(|tag| mode_tag(tag, t)))
+            .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(color).child(SharedString::from(text.to_string())))
+    };
+    let label = match &row.modes {
+        Modes::Both => line(None, &row.title, t.fg_muted),
+        Modes::Canvas => line(Some("CANVAS"), &row.title, t.fg_muted),
+        Modes::Split { canvas, strip } => div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(line(Some("CANVAS"), canvas, t.fg_muted))
+            .child(line(Some("STRIP"), strip, t.fg_muted)),
+    };
     div()
-        .min_h(px(ROW_H))
+        .min_h(px(row.height()))
         .flex()
         .items_center()
         .justify_between()
         .gap(px(12.))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.5))
-                .text_color(t.fg_muted)
-                .child(SharedString::from(row.title.clone())),
-        )
+        .child(label.flex_1().min_w_0())
         .child(chips)
 }

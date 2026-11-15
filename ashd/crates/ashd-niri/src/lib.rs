@@ -29,7 +29,7 @@ pub mod strip;
 pub use canvas::{CanvasWindow, LiveViews, PlaneRect};
 pub use niri_ipc;
 pub use service::{NiriHandle, REQUEST_TIMEOUT, VIEWS_MIN_INTERVAL, is_live_view_event, start, start_with};
-pub use state::NiriState;
+pub use state::{NiriState, is_fullscreen_workspace};
 pub use strip::{Strip, StripColumn};
 
 /// Env var with the niri socket path (set by niri for its children).

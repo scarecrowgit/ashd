@@ -3,16 +3,16 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt as _, AnyElement, Bounds, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, Bounds, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, ObjectFit, ParentElement as _, Render, ScrollDelta, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, canvas, div, fill, hsla, img, point,
     px, size,
 };
 use ashd_svc_clipboard::{Entry, Kind};
-use ashd_tokens::{Rgba, motion::timing};
+use ashd_tokens::{Rgba, motion};
 use ashd_ui::{
-    ButtonKind, Icon, Theme, TooltipExt as _, anim, button_small, color, empty_state, icon, icon_button_sized, keycap,
-    label, overlay_panel, theme,
+    ButtonKind, Icon, Look, Theme, TooltipExt as _, anim, button_small, color, empty_state, follow, hover_wash, icon,
+    icon_button_sized, keycap, label, mix, overlay_panel, presence::Timing, state_layer, theme,
 };
 
 use crate::{
@@ -46,7 +46,6 @@ fn rgba(c: ashd_svc_clipboard::Colour) -> Hsla {
 impl Render for ClipboardPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        let seq = self.open_seq;
         div().size_full().flex().items_center().justify_center().child(
             overlay_panel(cx)
                 .id("clipboard-panel")
@@ -83,12 +82,7 @@ impl Render for ClipboardPanel {
                 .text_color(t.fg)
                 .child(self.render_header(&t, cx))
                 .child(self.render_body(&t, cx))
-                .child(self.render_footer(&t, cx))
-                .with_animation(
-                    ("clipboard-in", seq),
-                    anim::tween(timing::LAUNCHER_IN, anim::EASE_OUT_EXPO),
-                    |el, p| el.opacity(p),
-                ),
+                .child(self.render_footer(&t, cx)),
         )
     }
 }
@@ -122,7 +116,7 @@ impl ClipboardPanel {
             )
             .child(div().flex().flex_none().gap(px(6.)).children(Filter::ALL.map(|f| {
                 let active = self.filter == f;
-                let (accent, fg) = (t.accent, t.fg);
+                let accent = t.accent;
                 div()
                     .id(("clipboard-chip", f.index() as u32))
                     .h(px(24.))
@@ -131,15 +125,30 @@ impl ClipboardPanel {
                     .items_center()
                     .rounded(t.radius_control)
                     .border_1()
-                    .border_color(if active { t.accent } else { t.line })
-                    .text_color(if active { t.accent } else { t.fg_muted })
+                    .border_color(gpui::transparent_black())
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .cursor_pointer()
-                    .when(!active, move |d| d.hover(move |s| s.text_color(fg)))
-                    .when(active, move |d| d.hover(move |s| s.text_color(accent)))
+                    // The active chip's accent border and text cross-fade between chips.
+                    .child(state_layer(
+                        "chip-fx",
+                        active,
+                        Look::new(gpui::transparent_black(), t.line),
+                        Look::new(gpui::transparent_black(), t.accent),
+                        t.radius_control,
+                    ))
+                    .when(!active, |d| d.child(hover_wash(t.surface_2, None, t.radius_control)))
                     .on_click(cx.listener(move |this, _, _, cx| this.set_filter(f, cx)))
-                    .child(SharedString::from(format!("{} {}", f.label(), c.of(f))))
+                    .child(follow(
+                        "chip-label",
+                        if active { 1.0 } else { 0.0 },
+                        Timing::new(motion::timing::SWAP, anim::EASE_STANDARD),
+                        {
+                            let text = SharedString::from(format!("{} {}", f.label(), c.of(f)));
+                            let muted = t.fg_muted;
+                            move |p| div().text_color(mix(muted, accent, p)).child(text)
+                        },
+                    ).fade())
             })))
     }
 
@@ -238,7 +247,7 @@ impl ClipboardPanel {
             .border_l_2()
             .border_color(if selected { accent } else { clear() })
             .when(selected, |d| d.bg(s2))
-            .when(!selected, move |d| d.hover(move |s| s.bg(s2)))
+            .when(!selected, move |d| d.child(hover_wash(s2, None, t.radius_control)))
             .cursor_pointer()
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
                 this.select(ix, cx);

@@ -53,6 +53,23 @@ pub struct ModalStyle {
     pub scrim: bool,
 }
 
+/// How the overlay host moves a modal panel in and out (ARCHITECTURE.md "Overlay host
+/// motion"). The host does it for every modal; a panel only says when the default is
+/// wrong, by setting [`Panel::MOTION`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PanelMotion {
+    /// Dialogs (with a scrim) and the launcher class fade in 140 ms (out-expo) and out
+    /// 100 ms (out-quad) together with their scrim; popups without a scrim (they grow
+    /// out of the bar) do the same in 120 / 100 ms and travel 4 px.
+    #[default]
+    Auto,
+    /// Fade only, never travel.
+    Fade,
+    /// Appears and disappears at once: panels that are a *picture of the screen* (the
+    /// screenshot overlay must be gone before the capture).
+    Instant,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Placement {
     Frame(Slot),
@@ -89,6 +106,10 @@ pub trait Panel: Render + Sized + 'static {
     /// panel published on the target display wins. Panels keep honouring an explicit anchor.
     const ANCHORS: &'static [&'static str] = &[];
 
+    /// Modal panels: how the overlay host moves the panel in and out. The default fits
+    /// every popup and dialog; see [`PanelMotion`].
+    const MOTION: PanelMotion = PanelMotion::Auto;
+
     /// Build the panel. No `Window` here: modal panels are created at startup before any
     /// overlay window exists. Subscribe to what you render:
     /// `cx.observe(&ctx.services.sysinfo.state, |_, _, cx| cx.notify()).detach();`
@@ -112,6 +133,12 @@ pub trait Panel: Render + Sized + 'static {
 
     /// Modal panels: dismissed (outside click, Escape, `ashd … --close`, another modal
     /// opened, `Request::Dismiss`). Reset transient state here.
+    ///
+    /// The surface fades out first (≤ 100 ms) and stays drawn from the panel's state as it
+    /// was, so this runs when that exit is over, not at the moment of dismissal (at once
+    /// for [`PanelMotion::Instant`]). If the same panel is opened again while it leaves,
+    /// the exit is reversed and neither `on_close` nor a second construction happens:
+    /// only `on_open` runs again.
     fn on_close(&mut self, _cx: &mut Context<Self>) {}
 }
 
@@ -124,6 +151,8 @@ pub struct PanelInstance {
     pub placement: Placement,
     /// [`Panel::ANCHORS`].
     pub anchors: &'static [&'static str],
+    /// [`Panel::MOTION`].
+    pub motion: PanelMotion,
     pub view: AnyView,
     pub(crate) vtable: Rc<dyn PanelVTable>,
     pub(crate) entity: Rc<dyn Any>,
@@ -198,6 +227,7 @@ impl PanelRegistry {
                 id: P::ID,
                 placement: P::PLACEMENT,
                 anchors: P::ANCHORS,
+                motion: P::MOTION,
                 view: entity.clone().into(),
                 vtable: Rc::new(VTable::<P>(std::marker::PhantomData)),
                 entity: Rc::new(entity),

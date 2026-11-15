@@ -13,7 +13,7 @@ use ashd_ipc::{PanelOp, Request};
 use ashd_svc_mpris::MprisState;
 use ashd_ui::{Icon, Theme, icon};
 
-use crate::{BarPanel, caps, geom, ids, is_open, open_look, tray::MediaFit};
+use crate::{BarPanel, caps, geom, hover_layer, ids, is_open, open_layer, tray::MediaFit};
 
 /// What the control shows: the track title, else the player's name.
 pub fn now_playing_label(state: &MprisState) -> Option<(String, bool)> {
@@ -39,7 +39,6 @@ impl BarPanel {
         }
         let open = is_open(ids::MEDIA, &self.ctx, cx);
         let color = if playing { t.accent } else { t.fg_muted };
-        let s2 = t.surface_2;
         let el = div()
             .id("bar-now-playing")
             .relative()
@@ -52,7 +51,8 @@ impl BarPanel {
             .gap(px(geom::NOW_PLAYING_TITLE_GAP))
             .rounded(t.radius_control)
             .cursor_pointer()
-            .when(!open, |d| d.hover(move |s| s.bg(s2)))
+            .child(open_layer(open, t))
+            .when(!open, |d| d.child(hover_layer(t)))
             .child(icon(Icon::Music, geom::NOW_PLAYING_ICON).text_color(color))
             .when_some(if let MediaFit::Title(w) = fit { Some(w) } else { None }, |d, w| {
                 d.child(
@@ -75,7 +75,26 @@ impl BarPanel {
                 }
             }))
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, _| this.media_scroll(ev)));
-        Some(open_look(el, open, t))
+        Some(el)
+    }
+
+    /// The control as it was, for the moment it fades out after the player went (no
+    /// handlers: it is already gone).
+    pub(crate) fn now_playing_ghost(title: String, playing: bool, fit: MediaFit, t: &Theme) -> Div {
+        let color = if playing { t.accent } else { t.fg_muted };
+        div()
+            .relative()
+            .flex_none()
+            .h(px(geom::TRAY_BOX))
+            .min_w(px(geom::NOW_PLAYING_GLYPH_W))
+            .px(px((geom::NOW_PLAYING_GLYPH_W - geom::NOW_PLAYING_ICON) / 2.))
+            .flex()
+            .items_center()
+            .gap(px(geom::NOW_PLAYING_TITLE_GAP))
+            .child(icon(Icon::Music, geom::NOW_PLAYING_ICON).text_color(color))
+            .when_some(if let MediaFit::Title(w) = fit { Some(w) } else { None }, |d, w| {
+                d.child(caps(title, geom::VALUE_SIZE, color, t).max_w(px(w)).overflow_hidden().whitespace_nowrap().text_ellipsis())
+            })
     }
 
     /// Wheel: one notch (or `TRAY_SCROLL_PIXELS` of touchpad travel) = one track; up =

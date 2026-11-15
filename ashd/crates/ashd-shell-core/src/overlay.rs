@@ -10,16 +10,20 @@
 //!   destroyed on close; ~50 ms). A click outside the panel's `.occlude()`d content or
 //!   Escape (`ModalDismiss` in key context `AshdModal`) dismisses it.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use gpui::{
     App, Bounds, Context, Div, Entity, Global, IntoElement, KeyBinding, MouseButton, ParentElement as _, Pixels,
     Styled as _, Window, WindowId, actions, canvas, div, prelude::*,
 };
-use ashd_ui::theme;
+use ashd_tokens::motion::{EASE_OUT_EXPO, EASE_OUT_QUAD, timing};
+use ashd_ui::{
+    presence::{Presence, Timing},
+    theme,
+};
 
 use crate::{
-    ModalAnchor, ModalState, PanelId, Placement, Shell,
+    ModalAnchor, ModalState, PanelId, PanelInstance, PanelMotion, Placement, Shell,
     surfaces::{self, SurfaceKind, SurfaceRoot},
 };
 
@@ -344,7 +348,7 @@ pub(crate) fn refresh_passive(shell: &Entity<Shell>, cx: &mut App) {
 
 // ── modal ─────────────────────────────────────────────────────────────────────
 
-pub(crate) fn render_modal(root: &mut SurfaceRoot, _window: &mut Window, cx: &mut Context<SurfaceRoot>) -> impl IntoElement {
+pub(crate) fn render_modal(root: &mut SurfaceRoot, window: &mut Window, cx: &mut Context<SurfaceRoot>) -> impl IntoElement {
     let focus = root.focus.get_or_insert_with(|| cx.focus_handle()).clone();
     if root.lingering {
         // Closed, waiting for key releases: nothing drawn, nothing clickable, no actions.
@@ -369,17 +373,32 @@ pub(crate) fn render_modal(root: &mut SurfaceRoot, _window: &mut Window, cx: &mu
             .into_any_element();
     }
     let t = theme(cx).clone();
-    let (view, scrim) = root
+    // Motion: the panel and its scrim follow `presence` (clock-driven; frames are asked
+    // for only while it moves).
+    let now = Instant::now();
+    let (fade, travel) = (root.presence.value(now), root.presence.movement(now));
+    if root.presence.is_animating(now) {
+        window.request_animation_frame();
+    }
+    if root.region_closed != root.closing {
+        // A leaving panel is click-through: the next click belongs to what is below.
+        window.set_input_region(if root.closing { Some(&[]) } else { None });
+        root.region_closed = root.closing;
+    }
+    let closing = root.closing;
+    let (view, scrim, slide) = root
         .shell
         .upgrade()
         .and_then(|s| {
             let s = s.read(cx);
-            let m = s.modal.as_ref()?;
-            let p = s.modal_panels.iter().find(|p| p.id == m.panel)?;
+            let id = root.modal_panel.or_else(|| s.modal.as_ref().map(|m| m.panel))?;
+            let p = s.modal_panels.iter().find(|p| p.id == id)?;
             let scrim = matches!(p.placement, Placement::Modal(style) if style.scrim);
-            Some((p.view.clone(), scrim))
+            let slide = p.motion == PanelMotion::Auto && !scrim;
+            Some((p.view.clone(), scrim, slide))
         })
-        .unzip();
+        .map(|(v, s, sl)| (Some(v), Some(s), sl))
+        .unwrap_or((None, None, false));
     let shell = root.shell.clone();
     // Deferred: these handlers run inside this very window's event dispatch, where
     // `remove_window` on it cannot run (the window is checked out) — closing inline left a
@@ -393,25 +412,194 @@ pub(crate) fn render_modal(root: &mut SurfaceRoot, _window: &mut Window, cx: &mu
         });
     };
     let dismiss2 = dismiss.clone();
+    let dy = if slide { timing::POPUP_SLIDE } else { 0.0 };
     div()
         .size_full()
         .relative()
         .track_focus(&focus)
-        .key_context("AshdModal")
+        // A leaving panel takes no keys: no `AshdModal` context, no actions. (Focus is on
+        // this root, so none of the panel's own bindings are in the dispatch path either.)
+        .when(!closing, |d| d.key_context("AshdModal").on_action(move |_: &ModalDismiss, _, cx| dismiss(cx)))
         .capture_key_up(|ev, _, cx| modal_key_up(ev, cx))
-        .on_action(move |_: &ModalDismiss, _, cx| dismiss(cx))
         .child(
             div()
                 .absolute()
                 .top_0()
                 .left_0()
                 .size_full()
-                .when(scrim == Some(true), |d| d.bg(t.scrim_power()))
+                .when(scrim == Some(true), |d| d.bg(t.scrim_power()).opacity(fade))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| dismiss2(cx))
                 .on_mouse_down(MouseButton::Right, |_, _, _| {}),
         )
-        .children(view.map(|v| div().absolute().top_0().left_0().size_full().child(v)))
+        .children(view.map(|v| {
+            ashd_ui::fx::fade_slide(div().absolute().left_0().size_full().child(v), fade, travel, dy)
+        }))
         .into_any_element()
+}
+
+/// Timings of a modal surface (dialogs and the launcher class vs popups out of the bar).
+fn timings(scrim: bool) -> (Timing, Timing) {
+    if scrim {
+        (Timing::new(timing::MODAL_IN, EASE_OUT_EXPO), Timing::new(timing::MODAL_OUT, EASE_OUT_QUAD))
+    } else {
+        (Timing::new(timing::POPUP_IN, EASE_OUT_EXPO), Timing::new(timing::POPUP_OUT, EASE_OUT_QUAD))
+    }
+}
+
+/// What a fresh modal surface starts with, before it knows its panel: entering, popup timings.
+pub(crate) fn initial_presence() -> Presence {
+    let (enter, exit) = timings(false);
+    Presence::entering(enter, exit, Instant::now())
+}
+
+/// Set up a freshly created modal surface for `instance`: which panel it shows, how it
+/// moves. The first frame was already drawn (entering, at 0).
+fn configure_modal(root: &mut SurfaceRoot, instance: &PanelInstance) {
+    let scrim = matches!(instance.placement, Placement::Modal(style) if style.scrim);
+    root.modal_panel = Some(instance.id);
+    let (enter, exit) = timings(scrim);
+    root.presence = if instance.motion == PanelMotion::Instant {
+        Presence::present(enter, exit, Instant::now())
+    } else {
+        Presence::entering(enter, exit, Instant::now())
+    };
+}
+
+// ── motion: leaving modals ────────────────────────────────────────────────────
+//
+// Dismissing a modal does not destroy its surface at once: the panel keeps drawing from the
+// state it had (so `Panel::on_close`, which resets that state, runs when the exit is over)
+// and fades out while the surface takes no input. `Shell::modal` is `None` from the moment
+// of the dismissal (toggles, highlights and `ashd status` see it closed); a panel that reads
+// `modal_anchor` / `modal_display` while it renders still gets its own. Opening the same
+// panel again while it leaves reverses the exit on the same surface.
+
+/// Leaving modal surfaces.
+#[derive(Default)]
+struct Closing {
+    list: Vec<ClosingModal>,
+    next: u64,
+}
+
+impl Global for Closing {}
+
+struct ClosingModal {
+    handle: gpui::WindowHandle<SurfaceRoot>,
+    instance: PanelInstance,
+    display: gpui::DisplayId,
+    anchor: Option<ModalAnchor>,
+    token: u64,
+}
+
+/// A leaving panel's own anchor (while it renders its exit).
+pub(crate) fn closing_anchor(panel: PanelId, cx: &App) -> Option<ModalAnchor> {
+    let c = cx.try_global::<Closing>()?;
+    c.list.iter().rev().find(|c| c.instance.id == panel).and_then(|c| c.anchor)
+}
+
+/// The display of the most recently dismissed modal still leaving.
+pub(crate) fn closing_display(cx: &App) -> Option<gpui::DisplayId> {
+    cx.try_global::<Closing>()?.list.last().map(|c| c.display)
+}
+
+/// Start the exit of modal surface `h` showing `instance`.
+fn begin_closing(
+    h: gpui::WindowHandle<SurfaceRoot>,
+    instance: PanelInstance,
+    display: gpui::DisplayId,
+    anchor: Option<ModalAnchor>,
+    cx: &mut App,
+) {
+    let now = Instant::now();
+    let started = h
+        .update(cx, |root, window, cx| {
+            root.closing = true;
+            root.presence.set_present(false, now);
+            // Key-ups (and the Escape that closed it) still have to reach this surface;
+            // the panel's own bindings must not.
+            if let Some(f) = &root.focus {
+                f.focus(window, cx);
+            }
+            cx.notify();
+            root.presence.remaining(now)
+        })
+        .ok();
+    let Some(wait) = started else {
+        // Checked out (dismissed from inside its own dispatch): decide again afterwards.
+        cx.defer(move |cx| begin_closing(h, instance, display, anchor, cx));
+        return;
+    };
+    let token = {
+        let c = cx.default_global::<Closing>();
+        c.next += 1;
+        c.list.push(ClosingModal { handle: h, instance, display, anchor, token: c.next });
+        c.next
+    };
+    tracing::debug!("modal surface {:?} leaves ({} ms)", h.window_id(), wait.as_millis());
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(wait + std::time::Duration::from_millis(16)).await;
+        cx.update(|cx| finish_closing(token, cx));
+    })
+    .detach();
+}
+
+/// The exit is over (or is cut short): `on_close`, then the surface goes (waiting for
+/// held keys, see "key repeat across modal surfaces").
+fn finish_closing(token: u64, cx: &mut App) {
+    let c = cx.default_global::<Closing>();
+    let Some(ix) = c.list.iter().position(|c| c.token == token) else { return };
+    let done = c.list.remove(ix);
+    done.instance.on_close(cx);
+    retire_modal_surface(done.handle, cx);
+}
+
+/// Cut every exit short (on `display`, or everywhere): `on_close` and the surfaces go now.
+pub(crate) fn flush_closing(display: Option<gpui::DisplayId>, cx: &mut App) {
+    let c = cx.default_global::<Closing>();
+    let (done, keep): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut c.list).into_iter().partition(|c| display.is_none_or(|d| c.display == d));
+    c.list = keep;
+    for d in done {
+        d.instance.on_close(cx);
+        end_linger(d.handle, cx);
+    }
+}
+
+/// Take the leaving surface of `panel` on `display` back: true when there was one.
+fn revive_closing(shell: &Entity<Shell>, panel: PanelId, display: gpui::DisplayId, cx: &mut App) -> bool {
+    let c = cx.default_global::<Closing>();
+    let Some(ix) = c.list.iter().position(|c| c.instance.id == panel && c.display == display) else { return false };
+    let back = c.list.remove(ix);
+    let now = Instant::now();
+    let instance = back.instance.clone();
+    let ok = back
+        .handle
+        .update(cx, |root, window, cx| {
+            root.closing = false;
+            root.presence.set_present(true, now);
+            window.activate_window();
+            instance.on_open(window, cx);
+            if window.focused(cx).is_none()
+                && let Some(f) = &root.focus
+            {
+                f.focus(window, cx);
+            }
+            cx.notify();
+        })
+        .is_ok();
+    if !ok {
+        // Cannot be reached any more: let it go the usual way.
+        back.instance.on_close(cx);
+        retire_modal_surface(back.handle, cx);
+        return false;
+    }
+    shell.update(cx, |s, _| {
+        if let Some(ds) = s.displays.get_mut(&display) {
+            ds.windows.insert(SurfaceKind::OverlayModal, back.handle);
+        }
+    });
+    tracing::debug!("modal surface {:?}: exit reversed", back.handle.window_id());
+    true
 }
 
 /// Open `panel` on `on` (a known display), else on the focused display.
@@ -454,7 +642,13 @@ pub(crate) fn open_modal(
         close_modal(shell, cx);
     }
 
+    // The same panel is still leaving on this display (closed a moment ago): turn that exit
+    // around instead of starting a second surface.
     shell.update(cx, |s, _| s.modal = Some(ModalState { panel, display, anchor }));
+    if revive_closing(shell, panel, display, cx) {
+        shell.update(cx, |_, cx| cx.notify());
+        return;
+    }
     match surfaces::open_surface(shell, display, SurfaceKind::OverlayModal, cx) {
         Ok(handle) => {
             if let Some(keys) = cx.try_global::<ModalKeys>()
@@ -463,6 +657,7 @@ pub(crate) fn open_modal(
                 cx.global_mut::<ModalKeys>().opened(handle.window_id());
             }
             let _ = handle.update(cx, |root, window, cx| {
+                configure_modal(root, &instance);
                 window.activate_window();
                 instance.on_open(window, cx);
                 // Key-ups must reach the surface root (they end a linger) even when the
@@ -485,15 +680,25 @@ pub(crate) fn open_modal(
 pub(crate) fn close_modal(shell: &Entity<Shell>, cx: &mut App) {
     let Some(prev) = shell.update(cx, |s, _| s.modal.take()) else { return };
     let instance = shell.read(cx).modal_panels.iter().find(|p| p.id == prev.panel).cloned();
-    if let Some(p) = instance {
-        p.on_close(cx);
-    }
-    // Out of the registry at once (a new modal gets a fresh surface); destroyed now or
-    // after the release of the keys still down (see "key repeat across modal surfaces").
+    // Out of the registry at once (a new modal gets a fresh surface, or takes this one
+    // back while it leaves).
     let handle = shell.update(cx, |s, _| s.displays.get_mut(&prev.display)?.windows.remove(&SurfaceKind::OverlayModal));
-    if let Some(h) = handle {
-        tracing::info!("closed {} on {:?}", SurfaceKind::OverlayModal.name(), prev.display);
-        retire_modal_surface(h, cx);
+    match (handle, instance) {
+        (Some(h), Some(instance)) if instance.motion != PanelMotion::Instant && !shell.read(cx).shutting_down => {
+            tracing::info!("closing {} on {:?}", SurfaceKind::OverlayModal.name(), prev.display);
+            begin_closing(h, instance, prev.display, prev.anchor, cx);
+        }
+        (handle, instance) => {
+            if let Some(p) = instance {
+                p.on_close(cx);
+            }
+            // Destroyed now or after the release of the keys still down (see "key repeat
+            // across modal surfaces").
+            if let Some(h) = handle {
+                tracing::info!("closed {} on {:?}", SurfaceKind::OverlayModal.name(), prev.display);
+                retire_modal_surface(h, cx);
+            }
+        }
     }
     shell.update(cx, |_, cx| cx.notify());
 }

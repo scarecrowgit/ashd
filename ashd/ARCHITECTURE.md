@@ -89,7 +89,11 @@ gpui uses its own git wgpu — no binary links both (GPUI-NOTES §1).
    polkit, network, Bluetooth or power from tests: nested session only (§13).
 5. No git index/history commands; the integrator commits. No `cargo update`.
 6. **Apps are launched through niri** (`ctx.shell.spawn(argv, cx)` → `Action::Spawn`), never
-   `std::process::Command` from the shell. Binaries never rely on `LD_LIBRARY_PATH`.
+   `std::process::Command` from the shell. Binaries never rely on `LD_LIBRARY_PATH`. The one
+   exception is the launcher's inline command output (`panels/launcher/src/runner.rs`): a
+   typed command runs as `sh -lc` in `$HOME` from the shell's own environment, because its
+   stdout/stderr have to come back through pipes the shell owns (capped buffer, killed with
+   the launcher). Everything else the launcher starts still goes through niri.
 7. One module per region: a panel's state lives in its struct, its view in `render`, its
    reactions in `on_request` / listeners. Don't reach into another panel's state.
 8. No bash/python scripts in the repo: tooling is Rust (`xtask`).
@@ -137,8 +141,34 @@ pub struct Theme { name, bg … syn_comment: Hsla, font_sans, font_mono, radius_
 // field empty_state window_frame hline vline alpha empty
 pub struct TextInput; pub enum TextInputEvent { Changed, Submit, Cancel, Tab, Up, Down, Blur }
 pub enum Icon { … }  pub fn icon(Icon, size) -> Svg;  pub fn app_icon(..);  pub fn spinner(..);
-pub mod anim { tween, ease_*, SpringValue, duration_ms /* ASHD_REDUCE_MOTION */ }
+pub mod anim { tween, ease_*, SpringValue, duration_ms /* ASHD_REDUCE_MOTION, ASHD_MOTION_SCALE */ }
+pub mod presence { Tween, Presence, PresenceList, Timing }   // time-based state machines, plain data
+pub mod fx { hover_wash, hover_ring, flip, follow, fill_bar, reveal, state_layer, select_plate, fade_slide, mix, swap }
 ```
+
+### Motion (shared; TOKENS.md §9, `ashd-tokens::motion`)
+
+Everything that appears, changes or leaves moves on the clock — never on the frame count — and
+asks for frames only while something moves (a settled desktop draws **nothing**; verify with
+`ASHD_FRAME_LOG=1`, below). One reduce-motion switch for all of it.
+
+| need | use |
+|---|---|
+| a thing appears / leaves (popup, row, badge) | [`presence::Presence`]: 0..1 with enter / exit [`Timing`]; closing keeps the thing alive until `is_gone`; reversing mid-flight continues from the current value. `movement()` is the end state at once under reduced motion, `value()` keeps the 80 ms fade. |
+| a keyed list gains / loses rows | [`presence::PresenceList`]: removed rows stay (leaving) with their last value and place; the first `sync` does not animate what was already there |
+| layout moved an element (a row above went) | `fx::flip(key, el)`: glides from the old position on the view spring (800) instead of jumping; scrolling an ancestor does not count |
+| hover / pressed fill (80 ms standard) | `fx::hover_wash(color, press, radius)` as the *first child* of an element that has an id (instead of `.hover(|s| s.bg(..))`); `hover_ring` for a border that lights up |
+| a value that changes (`fill_bar` = meter / progress fill, needs no id; slider / toggle / indicator / a selected row) | `fx::follow(id, target, timing, \|v\| el)` (first frame = target, later changes ease; `.fade()` for opacity/colour values, `.immediate(drag)`), `fx::state_layer`, `fx::select_plate` |
+| content that changes under a fixed id (a label, a glyph, a mode chip) | `fx::swap(id, key, \|p\| el)`: the old content fades out and the new one in over the same slot (`p` is the opacity, 4 px of travel instead of a scale: GPUI cannot scale a div); keyed by `key` (equal key = no motion) |
+| a surface that is shown in one mode and not in the other (strip header, canvas chip, minimap) | `canvas_hud::common::ModeFade<T>`: 280 ms out-cubic; keeps the last model so the leaving surface draws from a snapshot and tells the host to drop the passive overlay when the exit is over |
+| a frame surface (bar, rail, scratchpad) appears: a theme shape change recreates it | `Surface::appear` (a `Presence`): the surface fades in over the theme crossfade after a recreate (`sync_shape`). Never tied to fullscreen: see below |
+| a block that expands / collapses | `fx::reveal(id, p, \|p\| el)` with `p` from the caller's `Presence` (the caller keeps building it until the presence is gone) |
+
+Reduce motion: `"reduceMotion": true` in `shell.json` (applied at start and on SIGHUP),
+or `ASHD_REDUCE_MOTION=1` (wins), or `anim::set_reduced_motion`. Movement jumps to its end
+state, fades are shortened to 80 ms; `SpringValue` snaps. `ASHD_MOTION_SCALE=N` (1..100, test
+aid) makes every shell tween and spring N× slower: `cargo xtask motion` uses it to photograph
+the frames in between.
 
 ## 7. ashd-ipc — CLI ↔ shell protocol
 
@@ -251,6 +281,25 @@ the visual index among the output's visible workspaces and **0 for hidden ones**
 (`focus-workspace N` counts visible ones); ashd-niri sorts hidden workspaces last and every
 number shown comes from `visible_number` (never 0), which is right for a stock niri, the
 current fork and older forks alike.
+
+**Fullscreen workspaces** (fork option `layout { fullscreen-workspaces }`): a window that goes
+fullscreen moves to a workspace of its own right after its origin; `Workspace::{fullscreen_window_id,
+fullscreen_origin_id}` (additive, `serde(default)`) mark it, its `idx` is 0 and it is visible. The
+model: `NiriState::workspaces_on` / `workspaces_sorted` return the **on-screen order** (numbered
+desks by `idx`; a fullscreen workspace right after its origin, the newest nearest; hidden last),
+`visible_number` counts desks only (a fullscreen workspace has none, so no other desk's number
+moves), `desk(id)` / `desk_number(id)` give a fullscreen workspace's origin (what the bar label,
+dock pill, canvas HUD and launcher rows show), `fullscreen_window(id)`, `is_fullscreen_workspace`.
+Empty workspaces in the middle of the list (`create-workspaces-by-index`) are ordinary desks.
+The rail draws a fullscreen workspace as a compact **app entry** under its origin desk
+(`RailKind::Fullscreen`, `geom::FS_H`: the window's app icon, a 1 px elbow to the desk above,
+the active marker shorter), never as a numbered desk; its flyout shows the window and one action,
+*Leave fullscreen*. **The shell never reacts to fullscreen with the bar or the rail**: they are
+Top-layer surfaces, the compositor covers them over a fullscreen window and slides them in on an
+edge dwell (`edge-reveal`), so they always render their real content. Only the passive overlay
+chrome that lives on the *overlay* layer and would sit on top of the window (strip header, canvas
+chip, minimap: `canvas_hud::common::suppressed`, via `frame::is_fullscreen`) steps aside, with
+the usual `ModeFade`; the OSD and toasts stay (an OSD over a video is wanted).
 **Vendored niri-ipc** (`vendor/niri-ipc`, GPL-3.0-or-later): `src/` is a byte copy of the
 fork's `niri-ipc/src`; only the manifest differs. Re-sync whenever the fork's IPC changes
 (integrator); unknown events are skipped. The workspace licence is GPL-3.0-or-later.
@@ -304,9 +353,11 @@ Zones as niri applies them: the reserved strip is `exclusive_zone + margin` on t
 edge; surfaces created later lay out inside what is left, hence the creation order. Attached
 themes (Ash) have no margins. A theme switch that changes the frame `ShapeKey` (layout, gap,
 rail width, bar height) recreates bar/rail/scratchpad; everything else is a re-render
-(300 ms crossfade). The bar draws per `DockVariant`: `Bar` (Ash: one bar, status 560 with a
+(300 ms crossfade). The bar draws per `DockVariant`: `Bar` (Ash: one bar, status block with a
 border, dock centred on `DOCK_CENTER_X`), `Split` (Ink, Moss: status pill + three pills),
-`Pill` (Midnight, Dusk: status pill + one centred pill); in floating layouts the row ends at
+`Pill` (Midnight, Dusk: status pill + one centred pill). The status block hugs its content, at
+most `STATUS_W` (560): shell-core puts it in a fixed `STATUS_W` wrapper, so the dock and the
+other pills never move when the set of indicators changes. In floating layouts the row ends at
 the main area's right edge while the scratchpad is shown. Every surface root also carries
 `pointer_exit_reset()` (sticky-hover fix, GPUI-NOTES G8). `layer_options(kind, &DisplayInfo,
 &Theme)` is public. Displays map to niri outputs by `output_uuid(name)` (GPUI's v5 uuid).
@@ -364,6 +415,23 @@ signals (SIGTERM/SIGINT → clean shutdown, SIGHUP → reload `shell.json`).
 
 ### Overlay host behaviour
 
+- **Motion of modals** (`overlay.rs`; panels get it without code). A modal surface fades in with
+  its scrim (dialogs / launcher class: 140 ms out-expo in, 100 ms out-quad out; popups growing out
+  of the bar: 120 / 100 ms and a 4 px rise) and **stays alive while it leaves**: dismissing it
+  (Escape, outside click, `--close`, another modal) removes it from `Shell::modal` at once
+  (`ShellHandle::modal()` is `None`, toggles and bar highlights see it closed) but the surface
+  keeps drawing the panel from the state it had, click-through, with the keyboard focus on the
+  surface root, until the exit is over; then `Panel::on_close` runs and the surface is removed
+  (waiting for held keys, G7). While it leaves, `modal_anchor` / `modal_display` still answer for
+  that panel, so a popup does not jump. Opening the same panel again while it leaves **reverses the
+  exit on the same surface** (only `on_open` runs again; no restart, no stuck half-transparent
+  surface). A different modal may open while the old one leaves. `Panel::MOTION`:
+  `Auto` (above), `Fade` (never travels), `Instant` (the screenshot overlay: `on_close` and the
+  removal are immediate, no fade). Panels must not add their own fade of the whole card.
+- **Scratchpad**: the surface is created on show and the panel springs in from the right edge
+  (1.0 / 700); on hide it keeps the surface until the spring is done, with no exclusive zone (windows
+  re-flow at once) and no input; showing again reverses the spring.
+
 - **Passive** (toasts, OSD, rail flyout, strip header, canvas HUD, minimap, screenshot HUD,
   tray tooltip): each passive panel draws over the whole output; pointer input only inside
   `hit_area(..)`s (union applied every frame with `set_input_region`), click-through
@@ -395,8 +463,17 @@ signals (SIGTERM/SIGINT → clean shutdown, SIGHUP → reload `shell.json`).
 ### Status area (bar)
 
 clock │ cpu, mem │ network + volume (opens quick settings; VPN name capped at
-`VPN_LABEL_MAX`) · battery │ layout chip · [tray area] · bell. The tray area (`flex-1`,
-measured) holds the now-playing control (only while MPRIS has an active player: music glyph +
+`VPN_LABEL_MAX`) · battery │ layout chip · [tray area] · bell. Numeric readouts (cpu, mem,
+volume, battery) sit in right-aligned slots as wide as their widest value (`geom::slot_w`), so
+a digit change never moves a neighbour; `geom::row_width` / `row_gap` pick the widest gap at
+which the row fits the block's maximum (`geom::BLOCK_MAX_W`; the network control clips, a VPN
+shield that cannot fit is left out). The block is as wide as its content (the slots are fixed,
+so it changes only when an indicator appears or goes: VPN, tray, battery); the bell follows the
+layout chip (or the tray) at the row's gap and the block's border is that same gap behind it.
+`ASHD_BAR_FIXTURE=worst|worst-desktop|worst-read|calm` (nested session only; `worst-read` leaves the unread dot to real notifications, `calm` shows the narrowest readouts) forces the widest value of every
+readout for screenshots. The layout chip is the only keyboard-layout
+indicator (the OSD has no layout popup). The tray area (as wide as what it draws; the bar computes its room
+with `geom::tray_avail`) holds the now-playing control (only while MPRIS has an active player: music glyph +
 title, accent while playing; click → `Request::Media` anchored there, middle click
 play/pause, wheel next/previous) followed by the tray icons; one width budget
 (`tray::plan_row`): the title shrinks, then disappears, before tray icons move behind the
@@ -425,6 +502,10 @@ niri on `Request::Lock` and on the power bridge's lock events.
   calendar, media, theme pick, screenshot, record toggle, scratch hide/show on a client
   window; asserts no panic in the shell log), `ci [--fast] [--niri-config F]` (check, clippy
   -D warnings, test, build, shot-check all themes, smoke; summary table).
+- `motion [--scale 10] [--only NAME] [--reduce-motion]`: slow-motion burst screenshots of every
+  modal and the scratchpad opening and closing (frames must exist between the end states, the
+  settled pictures must be identical, open-close-open must settle open, close-open-close closed)
+  and three idle seconds that must draw no frame (`ASHD_FRAME_LOG`).
 - CI recipe (build the fork first: `nix build .#niri`): `NIRI=$PWD/../result/bin/niri cargo xtask ci
   --niri-config crates/panels/scratchpad/tests/assets/nested-niri-scratch.kdl`.
 
@@ -438,4 +519,8 @@ niri on `Request::Lock` and on the power bridge's lock events.
 | `ASHD_BT_MOCK=<scenario>` | canned Bluetooth state |
 | `ASHD_FAKE_BRIGHTNESS=n`, `ASHD_FAKE_NIGHTLIGHT=1` | fake displays / gamma (with `ASHD_NESTED=1`) |
 | `ASHD_POLKIT_AGENT=ashd`, `ASHD_POLKIT_BUS`, `ASHD_POLKIT_HELPER` | polkit agent on / mock bus + helper (`polkit_mock` example) |
-| `ASHD_FM_BIN`, `ASHD_LOCK_BIN`, `ASHD_TERMINAL`, `ASHD_KEYBINDS`, `ASHD_ICON_THEME`, `ASHD_SEARCH_URL`, `ASHD_CLIPBOARD_PRIMARY`, `ASHD_REDUCE_MOTION` | binaries / config overrides |
+| `ASHD_BAR_FIXTURE=worst\|worst-desktop\|worst-read\|calm` | the bar shows its widest value in every readout (needs `ASHD_NESTED=1`) |
+| `ASHD_FM_BIN`, `ASHD_LOCK_BIN`, `ASHD_TERMINAL`, `ASHD_KEYBINDS`, `ASHD_ICON_THEME`, `ASHD_SEARCH_URL`, `ASHD_CLIPBOARD_PRIMARY` | binaries / config overrides |
+| `ASHD_REDUCE_MOTION=1` | reduce motion (also `"reduceMotion": true` in `shell.json`; the variable wins) |
+| `ASHD_MOTION_SCALE=N` | test aid: every tween / spring N× slower (`cargo xtask motion`) |
+| `ASHD_FRAME_LOG=1` | log frames drawn per second per surface kind (`frames/s bar=0 rail=0 …`); a settled desktop reads zeros |

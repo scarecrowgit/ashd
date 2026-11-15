@@ -15,6 +15,7 @@ pub mod anchors;
 pub mod apps;
 pub mod config;
 pub mod frame;
+mod framelog;
 mod ipc;
 pub mod notices;
 mod overlay;
@@ -31,7 +32,7 @@ use gpui::{App, AppContext as _, Entity, QuitMode};
 pub use config::{AppsConfig, ShellConfig, config};
 pub use ipc::dispatch;
 pub use overlay::{LINGER_MAX, ModalDismiss, hit_area, pointer_exit_reset};
-pub use panel::{ModalAnchor, ModalStyle, Panel, PanelContext, PanelId, PanelInstance, PanelRegistry, Placement, Slot};
+pub use panel::{ModalAnchor, ModalStyle, Panel, PanelMotion, PanelContext, PanelId, PanelInstance, PanelRegistry, Placement, Slot};
 use ashd_tokens::ThemeName;
 pub use shell::{ModalState, Service, Services, Shell, ShellHandle};
 pub use surfaces::{DisplayInfo, ShapeKey, SurfaceKind, SurfaceRoot, layer_options, output_uuid};
@@ -85,7 +86,9 @@ pub fn run(options: ShellOptions, register: impl FnOnce(&mut PanelRegistry)) -> 
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             ashd_ui::init(options.theme.unwrap_or_else(ashd_tokens::state::current_theme), cx);
+            framelog::start_from_env();
             cx.set_global(shell_config);
+            config::apply_motion(cx);
             overlay::bind_keys(cx);
             let services = start_services(options.services, cx);
             let shell = cx.new(|_| Shell {
@@ -178,6 +181,8 @@ pub(crate) fn shutdown(shell: &Entity<Shell>, cx: &mut App) {
     }
     tracing::info!("shutting down");
     overlay::close_modal(shell, cx);
+    overlay::flush_closing(None, cx);
+    surfaces::flush_leaving(None, cx);
     overlay::end_all_lingering(cx);
     shell.update(cx, |s, _| s.shutting_down = true);
     let ids: Vec<_> = shell.read(cx).displays.keys().copied().collect();

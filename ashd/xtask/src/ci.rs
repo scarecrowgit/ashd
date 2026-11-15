@@ -8,7 +8,7 @@ use std::{
 use anyhow::Result;
 use clap::Args;
 
-use crate::{check, smoke, util};
+use crate::{check, fullscreen, smoke, util};
 
 #[derive(Args)]
 pub struct CiArgs {
@@ -64,6 +64,9 @@ pub fn dispatch(args: CiArgs) -> Result<ExitCode> {
             s.no_build = true;
             s.niri_config = args.niri_config.clone();
             timed(&mut rows, "smoke", || report(smoke::run(&s)));
+            let mut f = fullscreen::FullscreenArgs::defaults();
+            f.no_build = true;
+            timed(&mut rows, "fullscreen", || report(fullscreen::run(&f)));
         }
     }
     println!("\n{:<58} {:<6} time", "step", "result");

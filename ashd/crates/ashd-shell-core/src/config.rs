@@ -3,11 +3,15 @@
 //!
 //! ```json
 //! { "dock": ["kitty", "firefox", "org.gnome.Nautilus"],
-//!   "apps": { "terminal": "kitty", "browser": "firefox", "fileManager": "org.gnome.Nautilus" } }
+//!   "apps": { "terminal": "kitty", "browser": "firefox", "fileManager": "org.gnome.Nautilus" },
+//!   "reduceMotion": false }
 //! ```
 //!
 //! `dock` entries are desktop-file ids (`kitty` or `kitty.desktop`). `apps` values are a
 //! desktop id or, if no installed app has that id, a command line (`"foot -e btop"`).
+//! `reduceMotion: true` is the shell's one motion switch: movement happens at once and only
+//! 80 ms fades remain (TOKENS.md §9); `ASHD_REDUCE_MOTION=1` in the environment does the
+//! same and wins.
 //! Read once at startup and again on SIGHUP; panels read it with
 //! [`crate::config`] / [`ShellHandle::config`](crate::ShellHandle::config).
 
@@ -31,6 +35,8 @@ pub struct ShellConfig {
     /// Pinned dock apps, desktop ids in order (`.desktop` suffix stripped).
     pub dock: Vec<String>,
     pub apps: AppsConfig,
+    /// `reduceMotion` (see the module docs); `None` = not set.
+    pub reduce_motion: Option<bool>,
     /// Files that were read, in order (for logs / `ashd status` debugging).
     pub sources: Vec<PathBuf>,
 }
@@ -43,6 +49,8 @@ impl Global for ShellConfig {}
 struct RawConfig {
     dock: Option<Vec<String>>,
     apps: Option<AppsConfig>,
+    #[serde(rename = "reduceMotion")]
+    reduce_motion: Option<bool>,
 }
 
 impl ShellConfig {
@@ -86,12 +94,25 @@ impl ShellConfig {
         if let Some(dock) = raw.dock {
             self.dock = dock.into_iter().map(|id| normalize_id(&id)).filter(|id| !id.is_empty()).collect();
         }
+        if raw.reduce_motion.is_some() {
+            self.reduce_motion = raw.reduce_motion;
+        }
         if let Some(apps) = raw.apps {
             self.apps.terminal = apps.terminal.or(self.apps.terminal.take());
             self.apps.browser = apps.browser.or(self.apps.browser.take());
             self.apps.file_manager = apps.file_manager.or(self.apps.file_manager.take());
         }
     }
+}
+
+/// Apply `reduceMotion` from the configuration (startup, SIGHUP). The environment variable
+/// `ASHD_REDUCE_MOTION` decides when it is set; otherwise the file does (default: off).
+pub fn apply_motion(cx: &mut App) {
+    if std::env::var_os("ASHD_REDUCE_MOTION").is_some() {
+        return;
+    }
+    let on = config(cx).reduce_motion.unwrap_or(false);
+    ashd_ui::anim::set_reduced_motion(on, cx);
 }
 
 /// `kitty.desktop` → `kitty`.
@@ -137,13 +158,14 @@ mod tests {
         let user = dir.join("user.json");
         std::fs::write(&sys, r#"{"dock":["kitty.desktop","firefox"],"apps":{"terminal":"kitty","browser":"firefox"}}"#)
             .unwrap();
-        std::fs::write(&user, r#"{"apps":{"browser":"zen","fileManager":"yazi"}}"#).unwrap();
+        std::fs::write(&user, r#"{"apps":{"browser":"zen","fileManager":"yazi"},"reduceMotion":true}"#).unwrap();
         let c = ShellConfig::load_from(&[&sys, &user, &dir.join("missing.json")]);
         assert_eq!(c.dock, vec!["kitty", "firefox"]);
         assert_eq!(c.apps.terminal.as_deref(), Some("kitty"));
         assert_eq!(c.apps.browser.as_deref(), Some("zen"));
         assert_eq!(c.apps.file_manager.as_deref(), Some("yazi"));
         assert_eq!(c.sources.len(), 2);
+        assert_eq!(c.reduce_motion, Some(true));
 
         std::fs::write(&user, "{ not json").unwrap();
         let c = ShellConfig::load_from(&[&sys, &user]);

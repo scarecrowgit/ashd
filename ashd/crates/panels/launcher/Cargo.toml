@@ -23,6 +23,8 @@ emojis.workspace = true
 ignore.workspace = true
 dirs.workspace = true
 shlex.workspace = true
+async-channel.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

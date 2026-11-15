@@ -1,0 +1,63 @@
+// niri config for `cargo xtask fullscreen` (ashd fork only): xtask/assets/nested-niri.kdl plus
+//   - fullscreen-workspaces: a fullscreen window gets a workspace of its own after its origin,
+//   - create-workspaces-by-index: empty workspaces may stand in the middle of the list,
+//   - edge-reveal: the shell's rail and bar slide in over a fullscreen window when the pointer
+//     rests at their edge.
+// Same as the generated config of the NixOS module (modules/desktop/niri/layout.nix).
+input {
+    keyboard {
+        xkb {
+            layout "us,ru"
+        }
+    }
+}
+
+layout {
+    gaps 12
+    center-focused-column "never"
+    default-column-width { proportion 0.5; }
+    background-color "#111110"
+    create-workspaces-by-index
+    fullscreen-workspaces
+    focus-ring {
+        width 1
+        active-color "#E0A458"
+        inactive-color "#2A2A27"
+    }
+    border {
+        off
+    }
+}
+
+edge-reveal {
+    on
+    dwell-ms 150
+    hide-delay-ms 400
+    namespace "^ashd-(rail|bar)$"
+}
+
+prefer-no-csd
+
+hotkey-overlay {
+    skip-at-startup
+}
+
+// Instant slides: the harness compares settled pictures.
+animations {
+    off
+}
+
+// The test driver parks the pointer at (0,0): no overview hot corner.
+gestures {
+    hot-corners {
+        off
+    }
+}
+
+screenshot-path null
+
+// The hidden scratch workspace of the fork, so this one config covers smoke's scratch steps too.
+workspace "code"
+workspace "scratch" {
+    hidden
+}

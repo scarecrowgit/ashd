@@ -21,7 +21,7 @@ use ashd_niri::{LiveViews, niri_ipc::Action};
 use ashd_shell_core::{Panel, PanelContext, PanelId, Placement};
 use ashd_ui::theme;
 
-use common::KeyBinds;
+use common::{KeyBinds, ModeFade, SWAP_TRAVEL};
 
 /// Chip offset inside the main area (desk-05 `left 14px; top 12px`).
 pub const HUD_LEFT: f32 = 14.0;
@@ -58,6 +58,8 @@ pub struct CanvasHudPanel {
     views: Entity<Arc<LiveViews>>,
     binds: Entity<KeyBinds>,
     model: Option<HudModel>,
+    /// The chip comes and goes with the mode (280 ms out-cubic).
+    fade: ModeFade<HudModel>,
 }
 
 impl CanvasHudPanel {
@@ -98,6 +100,7 @@ impl CanvasHudPanel {
         if next != self.model {
             let flips = next.is_some() != self.model.is_some();
             self.model = next;
+            self.fade.sync(self.model.as_ref());
             cx.notify();
             if flips {
                 self.ctx.shell.refresh_overlays(cx);
@@ -121,13 +124,14 @@ impl Panel for CanvasHudPanel {
         if let Some(shell) = ctx.shell.entity() {
             cx.observe(&shell, |this, _, cx| this.refresh(cx)).detach();
         }
-        let mut this = Self { ctx, views, binds, model: None };
+        let mut this = Self { ctx, views, binds, model: None, fade: ModeFade::new(None) };
         this.model = this.compute(cx);
+        this.fade = ModeFade::new(this.model.clone());
         this
     }
 
     fn is_live(&self, _cx: &App) -> bool {
-        self.model.is_some()
+        self.fade.is_live()
     }
 
     fn on_request(&mut self, request: &Request, _cx: &mut Context<Self>) -> Option<Response> {
@@ -140,15 +144,24 @@ impl Panel for CanvasHudPanel {
 }
 
 impl Render for CanvasHudPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().size_full().relative();
-        let Some(m) = self.model.clone() else { return root };
+        let shown = self.fade.view();
+        if self.fade.animating() {
+            window.request_animation_frame();
+        }
+        if self.fade.take_gone() {
+            // the exit is over: the overlay host may drop the surface
+            self.ctx.shell.refresh_overlays(cx);
+        }
+        let Some(common::Shown { content: m, fade, travel, .. }) = shown else { return root };
         let t = theme(cx).clone();
         let Some(d) = common::display_ctx(&self.ctx, &t, cx) else { return root };
         let chip = common::card(&t, t.radius_control)
             .absolute()
             .left(d.area.origin.x + px(HUD_LEFT))
-            .top(d.area.origin.y + px(HUD_TOP))
+            .top(d.area.origin.y + px(HUD_TOP) - px(SWAP_TRAVEL * (1.0 - travel)))
+            .opacity(fade)
             .flex()
             .items_center()
             .gap(px(GAP))

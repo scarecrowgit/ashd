@@ -14,7 +14,7 @@ use ashd_svc_sysinfo::{BatteryStatus, LinkKind, NetState};
 use ashd_svc_network::barview::{Glyph, Tone, bar_net};
 use ashd_ui::{Icon, icon, theme};
 
-use crate::{BoundsStore, caps, geom, ids, is_open, open_look, sep};
+use crate::{BoundsStore, caps, fixture, geom, hover_layer, ids, is_open, open_layer, sep, slot};
 
 /// Two-letter chip text for a niri/xkb layout name: `English (US)` → `EN`.
 pub fn layout_code(name: &str) -> String {
@@ -50,6 +50,17 @@ pub fn layout_code(name: &str) -> String {
         return code.to_string();
     }
     lower.chars().filter(|c| c.is_alphabetic()).take(2).collect::<String>().to_uppercase()
+}
+
+/// CPU readout: whole percent, `7%`, `100%` (never wider than [`geom::CPU_CHARS`]).
+pub fn cpu_label(fraction: f32) -> String {
+    let f = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+    format!("{:.0}%", (f * 100.0).round())
+}
+
+/// Volume readout next to the glyph: `0`..`150`, or `mute`.
+pub fn volume_label(percent: u32, muted: bool) -> String {
+    if muted { "mute".to_string() } else { percent.min(150).to_string() }
 }
 
 #[derive(Default)]
@@ -133,23 +144,28 @@ impl Panel for BarPanel {
 }
 
 impl Render for BarPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let now = chrono::Local::now();
-        let sys = self.ctx.services.sysinfo.state.read(cx).clone();
+        let mut sys = self.ctx.services.sysinfo.state.read(cx).clone();
         let audio = self.ctx.services.audio.state.read(cx);
-        let sink = audio.available.then(|| audio.default_sink().cloned()).flatten();
+        let mut sink = audio.available.then(|| audio.default_sink().cloned()).flatten().map(|d| ((d.volume * 100.0).round() as u32, d.muted));
         let notifications = self.ctx.services.notifications.state.read(cx);
-        let unread = notifications.notifications.iter().any(|n| n.seq > self.state.seen_seq);
+        let mut unread = notifications.notifications.iter().any(|n| n.seq > self.state.seen_seq);
+        // nested session only: force every readout to its widest value
+        if let Some(fx) = fixture::from_env() {
+            let forced = fx.apply(&mut sys);
+            sink = Some(forced.volume);
+            unread |= forced.unread;
+        }
         let niri = self.ctx.niri.read(cx);
         let layout = niri.current_layout().map(layout_code);
         let layouts = niri.keyboard_layouts.as_ref().map(|k| k.names.len()).unwrap_or(0);
-        let (fg, muted, s2) = (t.fg, t.fg_muted, t.surface_2);
+        let (fg, muted) = (t.fg, t.fg_muted);
 
         // ── clock ──
         let clock_open = is_open(ids::CALENDAR, &self.ctx, cx);
-        let clock = open_look(
-            div()
+        let clock = div()
                 .id("bar-clock")
                 .relative()
                 .flex_none()
@@ -159,15 +175,21 @@ impl Render for BarPanel {
                 .flex_col()
                 .justify_center()
                 .cursor_pointer()
-                .child(
-                    div()
-                        .font_family(t.font_mono.clone())
-                        .text_size(px(geom::CLOCK_SIZE))
-                        .line_height(px(geom::CLOCK_SIZE * geom::CLOCK_LINE))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg)
-                        .child(now.format("%H:%M").to_string()),
-                )
+                .child(open_layer(clock_open, &t))
+                .child({
+                    // the minute changes: the digits dip and come back (120 ms)
+                    let (mono, text) = (t.font_mono.clone(), now.format("%H:%M").to_string());
+                    ashd_ui::swap("clock-text", text.clone(), move |p| {
+                        div()
+                            .font_family(mono)
+                            .text_size(px(geom::CLOCK_SIZE))
+                            .line_height(px(geom::CLOCK_SIZE * geom::CLOCK_LINE))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg)
+                            .opacity(p)
+                            .child(text)
+                    })
+                })
                 .child(
                     caps(now.format("%a %-d %b").to_string(), geom::DATE_SIZE, muted, &t)
                         .line_height(px(geom::DATE_SIZE * geom::CLOCK_LINE + 1.)),
@@ -176,13 +198,10 @@ impl Render for BarPanel {
                 .on_click(cx.listener(|this, _, _, cx| {
                     let anchor = this.bounds.anchor("clock", &this.ctx, cx);
                     this.ctx.shell.request(Request::Calendar { op: PanelOp::Toggle }, anchor, cx);
-                })),
-            clock_open,
-            &t,
-        );
+                }));
 
         // ── cpu / mem ──
-        let meter_group = |caption: &str, value: f32, text: String| {
+        let meter_group = |caption: &str, value: f32, text: String, chars: usize| {
             div()
                 .flex()
                 .flex_none()
@@ -190,10 +209,10 @@ impl Render for BarPanel {
                 .gap(px(geom::METER_GAP))
                 .child(caps(caption.to_string(), geom::CAPTION_SIZE, muted, &t))
                 .child(ashd_ui::meter(value, geom::METER_W, cx))
-                .child(caps(text, geom::VALUE_SIZE, fg, &t))
+                .child(slot(text, chars, geom::VALUE_SIZE, fg, &t))
         };
-        let cpu = meter_group("cpu", sys.cpu, format!("{:.0}%", sys.cpu * 100.0));
-        let mem = meter_group("mem", sys.mem_fraction(), sys.mem_used_label());
+        let cpu = meter_group("cpu", sys.cpu, cpu_label(sys.cpu), geom::CPU_CHARS);
+        let mem = meter_group("mem", sys.mem_fraction(), sys.mem_used_label(), geom::MEM_CHARS);
 
         // ── network + volume (one control: opens quick settings) ──
         let net = &sys.network;
@@ -243,8 +262,41 @@ impl Render for BarPanel {
         } else {
             net_glyph.into_any_element()
         };
+        // ── how the row is laid out ──
+        // The block hugs its content (at most `STATUS_W`): the gap is the widest of the
+        // ladder at which the fixed parts fit, a VPN shield that cannot fit even at the
+        // tightest gap is left out, and the tray gets what the other items leave.
+        let net_chars = net_text.as_ref().map(|s| s.chars().count());
+        let has_battery = sys.battery.is_some();
+        let tray_present = self.tray_present(cx);
+        if !tray_present {
+            self.tray.animating = false;
+        }
+        let base = geom::Parts {
+            battery: has_battery,
+            net_text: net_chars,
+            vpn_label: None,
+            tray: tray_present.then_some(geom::TRAY_CHEVRON_W),
+        };
+        let vpn = vpn.filter(|_| geom::vpn_fits(base, geom::BLOCK_MAX_W));
+        let has_vpn = vpn.is_some();
+        let parts = geom::Parts { vpn_label: has_vpn.then_some(0.0), ..base };
+        let row_gap = geom::row_gap(parts, geom::BLOCK_MAX_W);
+        // ── tray (nothing at all while empty) ──
+        let tray_room = geom::tray_avail(parts, row_gap);
+        // The VPN label takes what the tray leaves; with less than ~3 characters of room the
+        // shield stands alone instead of next to a lone ellipsis.
+        let label_room = (tray_room - if tray_present { self.tray_area_width(tray_room, cx) } else { 0.0 }).max(0.0);
+        let vpn_label_w = geom::vpn_label_width(label_room);
+        let tray = if tray_present { self.tray_section(&t, tray_room, cx) } else { None };
+        if self.tray.animating {
+            window.request_animation_frame();
+        }
         let net_el = div()
             .flex()
+            .flex_shrink(1.0)
+            .min_w_0()
+            .overflow_hidden()
             .items_center()
             .gap(px(geom::NET_GAP))
             .child(
@@ -260,25 +312,31 @@ impl Render for BarPanel {
                     )
                 }),
             )
-            .children(net_text.map(|s| caps(s, geom::VALUE_SIZE, net_text_color, &t)))
+            .children(net_text.map(|s| {
+                let (size, color, tt) = (geom::VALUE_SIZE, net_text_color, t.clone());
+                ashd_ui::swap("net-text", s.clone(), move |p| caps(s, size, color, &tt).opacity(p))
+            }))
             .children(vpn.map(|name| {
                 div()
                     .flex()
+                    .min_w_0()
                     .items_center()
-                    .gap(px(4.))
-                    .child(icon(Icon::Shield, 12.).text_color(t.accent))
-                    // A long VPN name is cut, not allowed to eat the status pill.
-                    .child(
+                    .gap(px(geom::VPN_GAP))
+                    .child(icon(Icon::Shield, geom::VPN_ICON).text_color(t.accent).flex_none())
+                    // A long VPN name is cut, and gives way first when the row is tight:
+                    // it takes what is left after everything else, down to the shield.
+                    .children(vpn_label_w.map(|w| {
                         caps(name, geom::CAPTION_SIZE, t.accent, &t)
-                            .max_w(px(geom::VPN_LABEL_MAX))
+                            .flex_shrink(1.0)
+                            .min_w_0()
+                            .max_w(px(w))
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .text_ellipsis(),
-                    )
+                            .text_ellipsis()
+                    }))
             }));
-        let vol_el = sink.map(|d| {
-            let pct = (d.volume * 100.0).round() as u32;
-            let (ic, color) = if d.muted || pct == 0 {
+        let vol_el = sink.map(|(pct, is_muted)| {
+            let (ic, color) = if is_muted || pct == 0 {
                 (Icon::VolumeMute, muted)
             } else if pct < 34 {
                 (Icon::Volume0, fg)
@@ -289,34 +347,36 @@ impl Render for BarPanel {
             };
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(px(geom::ICON_GAP))
                 .child(icon(ic, geom::STATUS_ICON).text_color(color))
-                .child(caps(if d.muted { "mute".to_string() } else { pct.to_string() }, geom::VALUE_SIZE, color, &t))
+                .child(slot(volume_label(pct, is_muted), geom::VOLUME_CHARS, geom::VALUE_SIZE, color, &t))
         });
         let qs_open = is_open(ids::QUICK_SETTINGS, &self.ctx, cx);
-        let netvol = open_look(
-            div()
+        let netvol = div()
                 .id("bar-netvol")
                 .relative()
-                .flex_none()
+                // the one control that gives when the row is full (VPN label, then the
+                // text): everything else keeps its width, so the bell is never pushed out
+                .flex_shrink(1.0)
+                .min_w_0()
+                .overflow_hidden()
                 .h(px(geom::CONTROL_H))
                 .px(px(geom::CONTROL_PAD_X))
                 .flex()
                 .items_center()
                 .gap(px(geom::GAP))
                 .cursor_pointer()
-                .when(!qs_open, |d| d.hover(move |s| s.bg(s2)))
+                .child(open_layer(qs_open, &t))
+                .when(!qs_open, |d| d.child(hover_layer(&t)))
                 .child(net_el)
                 .children(vol_el)
                 .child(self.bounds.track("netvol"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     let anchor = this.bounds.anchor("netvol", &this.ctx, cx);
                     this.ctx.shell.request(Request::QuickSettings { op: PanelOp::Toggle }, anchor, cx);
-                })),
-            qs_open,
-            &t,
-        );
+                }));
 
         // ── battery (only if there is one) ──
         let battery = sys.battery.as_ref().map(|b| {
@@ -328,7 +388,7 @@ impl Render for BarPanel {
                 .items_center()
                 .gap(px(geom::ICON_GAP))
                 .child(icon(Icon::battery(b.percent as f32 / 100.0, charging), geom::STATUS_ICON).text_color(color))
-                .child(caps(format!("{}%", b.percent), geom::VALUE_SIZE, color, &t))
+                .child(slot(format!("{}%", b.percent), geom::BATTERY_CHARS, geom::VALUE_SIZE, color, &t))
         });
 
         // ── layout chip (click: next layout) ──
@@ -348,7 +408,7 @@ impl Render for BarPanel {
                 .text_size(px(geom::VALUE_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(accent)
-                .when(layouts > 1, |d| d.cursor_pointer().hover(move |s| s.bg(s2)))
+                .when(layouts > 1, |d| d.cursor_pointer().child(hover_layer(&t)))
                 .child(code)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.ctx.shell.niri_action(Action::SwitchLayout { layout: LayoutSwitchTarget::Next }, cx);
@@ -357,8 +417,7 @@ impl Render for BarPanel {
 
         // ── bell ──
         let bell_open = is_open(ids::NOTIFICATION_CENTER, &self.ctx, cx);
-        let bell = open_look(
-            div()
+        let bell = div()
                 .id("bar-bell")
                 .relative()
                 .flex_none()
@@ -368,38 +427,42 @@ impl Render for BarPanel {
                 .justify_center()
                 .rounded(t.radius_control)
                 .cursor_pointer()
-                .when(!bell_open, |d| d.hover(move |s| s.bg(s2)))
+                .child(open_layer(bell_open, &t))
+                .when(!bell_open, |d| d.child(hover_layer(&t)))
                 .child(icon(Icon::Bell, geom::BELL_ICON).text_color(fg))
-                .when(unread, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(geom::BELL_DOT_INSET))
-                            .right(px(geom::BELL_DOT_INSET))
-                            .size(px(geom::BELL_DOT))
-                            .rounded(px(geom::BELL_DOT / 2.))
-                            .bg(t.accent),
-                    )
-                })
+                // the unread dot grows in and shrinks away (120 ms)
+                .child(ashd_ui::follow(
+                    "bell-dot",
+                    if unread { 1.0 } else { 0.0 },
+                    ashd_ui::presence::Timing::new(ashd_ui::anim::motion::timing::SWAP, ashd_ui::anim::EASE_STANDARD),
+                    {
+                        let accent = t.accent;
+                        move |p| {
+                            let d = geom::BELL_DOT * p;
+                            div()
+                                .absolute()
+                                .top(px(geom::BELL_DOT_INSET + (geom::BELL_DOT - d) / 2.))
+                                .right(px(geom::BELL_DOT_INSET + (geom::BELL_DOT - d) / 2.))
+                                .size(px(d))
+                                .rounded(px(d / 2.))
+                                .bg(accent)
+                        }
+                    },
+                ))
                 .child(self.bounds.track("bell"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     let anchor = this.bounds.anchor("bell", &this.ctx, cx);
                     this.ctx.shell.request(Request::Notifications { op: PanelOp::Toggle }, anchor, cx);
-                })),
-            bell_open,
-            &t,
-        );
-
-        // ── tray (nothing at all while empty) ──
-        let tray = self.tray_section(&t, cx);
-        let row_gap = if tray.is_some() { geom::TRAY_ROW_GAP } else { geom::GAP };
+                }));
 
         let has_chip = chip.is_some();
         div()
             .id("bar-status")
-            .size_full()
+            .h_full()
+            .max_w(px(geom::BLOCK_MAX_W))
             .overflow_hidden()
-            .px(px(geom::PAD_X - 4.))
+            .pl(px(geom::PAD_LEFT))
+            .pr(px(row_gap))
             .flex()
             .items_center()
             .gap(px(row_gap))
@@ -412,6 +475,8 @@ impl Render for BarPanel {
             .children(battery)
             .when(has_chip, |d| d.child(sep(&t)))
             .children(chip)
+            // the bell follows the chip (or the tray) at the row's gap; the block ends
+            // one gap after it
             .children(tray)
             .child(bell)
     }
@@ -420,6 +485,22 @@ impl Render for BarPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readout_labels_stay_inside_their_slots() {
+        assert_eq!(cpu_label(0.0), "0%");
+        assert_eq!(cpu_label(0.074), "7%");
+        assert_eq!(cpu_label(1.0), "100%");
+        assert_eq!(cpu_label(1.7), "100%", "never wider than the slot");
+        assert_eq!(cpu_label(f32::NAN), "0%");
+        assert_eq!(volume_label(62, false), "62");
+        assert_eq!(volume_label(150, false), "150");
+        assert_eq!(volume_label(400, false), "150");
+        assert_eq!(volume_label(62, true), "mute");
+        for text in [cpu_label(1.0), volume_label(150, false), volume_label(0, true)] {
+            assert!(text.chars().count() <= geom::VOLUME_CHARS.max(geom::CPU_CHARS));
+        }
+    }
 
     #[test]
     fn layout_codes() {

@@ -72,6 +72,8 @@ fn workspace(id: u64, idx: u8, out: &str, active: bool, focused: bool) -> Worksp
         active_window_id: None,
         mode: Default::default(),
         is_hidden: false,
+        fullscreen_window_id: None,
+        fullscreen_origin_id: None,
     }
 }
 

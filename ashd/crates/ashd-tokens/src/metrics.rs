@@ -36,9 +36,20 @@ pub const BAR_END_INSET: f32 = 14.0;
 
 /// Gap between strip columns (desk-05 `gap 12`); also niri's `layout { gaps }`.
 pub const STRIP_GAP: f32 = 12.0;
-/// Height the shell's strip header reserves at the top of niri's working area (`struts { top }`),
-/// every theme; floating themes add the theme gap on top.
-pub const STRIP_HEADER_STRUT: f32 = 30.0;
+/// The strip header row inside the main area (desk-05 `top 10px; height 24px`).
+pub const STRIP_HEADER_TOP: f32 = 10.0;
+pub const STRIP_HEADER_H: f32 = 24.0;
+/// A window's focus ring as niri draws it (`focus-ring { gap 4; width 1 }` in the generated
+/// fragment): it sticks out of the window by `gap + width`.
+pub const WINDOW_RING_GAP: f32 = 4.0;
+pub const WINDOW_RING_W: f32 = 1.0;
+/// Height the shell's strip header reserves at the top of niri's working area (`struts { top }`)
+/// in the attached layout (Ash): header top + header height + the focus ring's reach (39). The
+/// mockup's 30 left the focused window's ring 3 px under the header's key chips (the windows
+/// start 8 px below them, the ring is 5 px outside the window); with the ring's reach included
+/// the chips clear the topmost ring by exactly the layout gap (12). Floating themes reserve
+/// more, see `render::niri_top_strut`.
+pub const STRIP_HEADER_STRUT: f32 = STRIP_HEADER_TOP + STRIP_HEADER_H + WINDOW_RING_GAP + WINDOW_RING_W;
 
 /// Right scratchpad panel. Anchored top|bottom|right, exclusive zone = width while shown.
 pub const SCRATCH_W: f32 = 340.0;

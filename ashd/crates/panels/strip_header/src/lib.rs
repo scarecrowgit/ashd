@@ -22,17 +22,24 @@ use std::sync::Arc;
 
 use gpui::{
     App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ashd_niri::{LiveViews, niri_ipc::Action};
-use ashd_panel_canvas_hud::common::{self, Hover, KeyBinds};
+use ashd_panel_canvas_hud::common::{self, Hover, KeyBinds, ModeFade, SWAP_TRAVEL};
 use ashd_shell_core::{Panel, PanelContext, PanelId, Placement, hit_area};
-use ashd_ui::{Icon, theme};
+use ashd_tokens::metrics;
+use ashd_ui::{
+    Icon,
+    anim::{EASE_STANDARD, motion::timing},
+    follow, mix,
+    presence::Timing,
+    swap, theme,
+};
 
 /// Row offset inside the main area (desk-05 `left 12px; top 10px`), height 24, gap 12.
 pub const HEADER_LEFT: f32 = 12.0;
-pub const HEADER_TOP: f32 = 10.0;
-pub const HEADER_H: f32 = 24.0;
+pub const HEADER_TOP: f32 = metrics::STRIP_HEADER_TOP;
+pub const HEADER_H: f32 = metrics::STRIP_HEADER_H;
 const ROW_GAP: f32 = 12.0;
 /// Column map: bar height 10, 3 apart (desk-05 l.349).
 const BAR_H: f32 = 10.0;
@@ -47,9 +54,13 @@ const MAP_MAX_SHARE: f32 = 0.4;
 const BUTTON: f32 = 24.0;
 /// The viewport marker sticks out of the bars by this much (top and bottom).
 const MARKER_OUT: f32 = 2.0;
-/// The screen-edge distance in the mockup is the header's top inset plus its height
-/// plus 8 (desk-05: strip at `top 42`).
-pub const STRUT_NEEDED: f32 = HEADER_TOP + HEADER_H + 8.0;
+/// What niri's top strut must reserve for this header in the attached layout: its top inset
+/// and height plus the focus ring's reach ([`metrics::STRIP_HEADER_STRUT`]). The mockup stops
+/// 8 px under the row (desk-05: strip at `top 42`), which leaves 3 px between the key chips and
+/// the focused window's ring; the ring's 5 px are added so the chips clear it by the layout
+/// gap. Floating themes reserve `gap + header + gap` instead (`render::niri_top_strut`): the
+/// chips clear the work-area outline by one gap.
+pub const STRUT_NEEDED: f32 = HEADER_TOP + HEADER_H + metrics::WINDOW_RING_GAP + metrics::WINDOW_RING_W;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeaderColumn {
@@ -134,6 +145,8 @@ pub struct StripHeaderPanel {
     model: Option<HeaderModel>,
     live: Option<LiveStrip>,
     hover: Hover,
+    /// The header comes and goes with the mode (280 ms out-cubic).
+    fade: ModeFade<HeaderModel>,
 }
 
 impl StripHeaderPanel {
@@ -185,6 +198,9 @@ impl StripHeaderPanel {
         let changed = next != self.model;
         let flips = next.is_some() != self.model.is_some();
         self.model = next;
+        if changed {
+            self.fade.sync(self.model.as_ref());
+        }
         let live = self.compute_live(cx);
         if changed || live != self.live {
             self.live = live;
@@ -223,14 +239,15 @@ impl Panel for StripHeaderPanel {
         if let Some(shell) = ctx.shell.entity() {
             cx.observe(&shell, |this, _, cx| this.refresh(cx)).detach();
         }
-        let mut this = Self { ctx, views, binds, model: None, live: None, hover: Hover::default() };
+        let mut this = Self { ctx, views, binds, model: None, live: None, hover: Hover::default(), fade: ModeFade::new(None) };
         this.model = this.compute(cx);
+        this.fade = ModeFade::new(this.model.clone());
         this.live = this.compute_live(cx);
         this
     }
 
     fn is_live(&self, _cx: &App) -> bool {
-        self.model.is_some()
+        self.fade.is_live()
     }
 }
 
@@ -239,9 +256,17 @@ fn hover_of(this: &mut StripHeaderPanel) -> &mut Hover {
 }
 
 impl Render for StripHeaderPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().size_full().relative();
-        let Some(m) = self.model.clone() else { return root };
+        let shown = self.fade.view();
+        if self.fade.animating() {
+            window.request_animation_frame();
+        }
+        if self.fade.take_gone() {
+            // the exit is over: the overlay host may drop the surface
+            self.ctx.shell.refresh_overlays(cx);
+        }
+        let Some(common::Shown { content: m, fade, travel, leaving }) = shown else { return root };
         let t = theme(cx).clone();
         let Some(d) = common::display_ctx(&self.ctx, &t, cx) else { return root };
         let live = self.live.clone();
@@ -262,31 +287,39 @@ impl Render for StripHeaderPanel {
         };
 
         let bar_els = m.columns.iter().zip(&bars).map(|(c, w)| {
-            let (border, fill) = if c.focused { (t.accent, Some(t.accent)) } else { (t.line, None) };
             let tiles = c.tiles.clamp(1, 4);
             let seg_h = (BAR_H - (tiles - 1) as f32) / tiles as f32;
-            let id = c.first_window;
-            div()
-                .id(("strip-header-col", c.index as u64))
-                .flex_none()
-                .w(px(*w))
-                .h(px(BAR_H))
-                .flex()
-                .flex_col()
-                .gap(px(1.))
-                .cursor_pointer()
-                .children((0..tiles).map(move |_| {
-                    div()
-                        .w_full()
-                        .h(px(seg_h))
-                        .border_1()
-                        .border_color(border)
-                        .rounded(bar_radius)
-                        .when_some(fill, |d, f| d.bg(f))
-                }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx.shell.niri_action(Action::FocusWindow { id }, cx);
-                }))
+            let (id, index, focused, width) = (c.first_window, c.index as u64, c.focused, *w);
+            let (accent, line) = (t.accent, t.line);
+            let ease = Timing::new(timing::DOCK_INDICATOR + 80, EASE_STANDARD); // 240 ms standard (the focus ring's)
+            let on_click = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                this.ctx.shell.niri_action(Action::FocusWindow { id }, cx);
+            });
+            // The bar's width follows its column (a resize glides), the focus ring's accent fades
+            // from column to column.
+            follow(("strip-header-col-w", index), width, ease, move |w| {
+                div()
+                    .id(("strip-header-col", index))
+                    .flex_none()
+                    .w(px(w))
+                    .h(px(BAR_H))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .cursor_pointer()
+                    .child(follow(("strip-header-col-f", index), if focused { 1.0 } else { 0.0 }, ease, move |p| {
+                        div().size_full().flex().flex_col().gap(px(1.)).children((0..tiles).map(move |_| {
+                            div()
+                                .w_full()
+                                .h(px(seg_h))
+                                .border_1()
+                                .border_color(mix(line, accent, p))
+                                .rounded(bar_radius)
+                                .bg(mix(gpui::transparent_black(), accent, p))
+                        }))
+                    }).fade())
+                    .on_click(on_click)
+            })
         });
 
         // Viewport marker over the map.
@@ -304,16 +337,14 @@ impl Render for StripHeaderPanel {
                 .border_color(t.fg)
                 .rounded(bar_radius)
         });
-        let map = hit_area(
-            div()
-                .relative()
-                .flex()
-                .items_center()
-                .gap(px(BAR_GAP))
-                .h(px(HEADER_H))
-                .children(bar_els)
-                .children(marker.map(|mk| div().absolute().left_0().top(px((HEADER_H - BAR_H) / 2.0)).child(mk))),
-        );
+        let map = div()
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(BAR_GAP))
+            .h(px(HEADER_H))
+            .children(bar_els)
+            .children(marker.map(|mk| div().absolute().left_0().top(px((HEADER_H - BAR_H) / 2.0)).child(mk)));
 
         let prev = common::track_hover(
             common::square_button("strip-header-prev", Icon::ChevronLeft, BUTTON, self.hover.is("prev"), &t),
@@ -329,21 +360,32 @@ impl Render for StripHeaderPanel {
             cx,
         )
         .on_click(cx.listener(|this, _, _, cx| this.column_action(Action::FocusColumnRight {}, cx)));
-        let buttons = hit_area(div().flex().items_center().gap(px(BAR_GAP * 2.0)).child(prev).child(next));
+        let buttons = div().flex().items_center().gap(px(BAR_GAP * 2.0)).child(prev).child(next);
+        // While the header leaves (the other mode's chips are coming in) it takes no clicks.
+        let (map, buttons) =
+            if leaving { (div().relative().child(map), div().relative().child(buttons)) } else { (hit_area(map), hit_area(buttons)) };
 
         let row = div()
             .absolute()
             .left(d.area.origin.x + px(HEADER_LEFT))
-            .top(d.area.origin.y + px(HEADER_TOP))
+            .top(d.area.origin.y + px(HEADER_TOP) - px(SWAP_TRAVEL * (1.0 - travel)))
+            .opacity(fade)
             .w(d.area.size.width - px(2.0 * HEADER_LEFT))
             .h(px(HEADER_H))
             .flex()
             .items_center()
             .gap(px(ROW_GAP))
-            .child(common::label(&m.label, t.fg_muted, &t))
+            // a changed workspace name or readout dips and comes back (120 ms)
+            .child({
+                let (text, tt) = (m.label.clone(), t.clone());
+                swap("strip-header-label", text.clone(), move |p| common::label(&text, tt.fg_muted, &tt).opacity(p))
+            })
             .child(common::label("scroll", t.fg, &t))
             .child(map)
-            .child(common::label(readout, t.fg_muted, &t))
+            .child({
+                let tt = t.clone();
+                swap("strip-header-readout", readout.clone(), move |p| common::label(&readout, tt.fg_muted, &tt).opacity(p))
+            })
             .child(div().flex_1())
             .child(buttons)
             .children(m.hint.map(|h| common::label(h, t.fg_muted, &t)))
@@ -392,7 +434,28 @@ mod tests {
     }
 
     #[test]
-    fn strut_matches_the_mockup() {
-        assert_eq!(STRUT_NEEDED, 42.0);
+    fn strut_leaves_the_layout_gap_between_the_chips_and_the_nearest_edge_below() {
+        use ashd_tokens::{LayoutVariant, ThemeName, render::niri_gaps, render::niri_top_strut, tokens};
+        let ring = metrics::WINDOW_RING_GAP + metrics::WINDOW_RING_W;
+        assert_eq!(STRUT_NEEDED, 39.0);
+        for name in ThemeName::ALL {
+            let t = tokens(name);
+            let gap = niri_gaps(t);
+            let strut = niri_top_strut(t);
+            // The row's bottom edge: the main area's inset (floating themes) + top + height.
+            let (inset, nearest) = match t.shape.layout {
+                // Attached: no outline; the topmost window's ring is the nearest edge.
+                LayoutVariant::Attached => {
+                    assert_eq!(strut, STRUT_NEEDED, "{name}");
+                    (0.0, strut + gap - ring)
+                }
+                // Floating: the work-area outline sits at the strut.
+                LayoutVariant::Floating => (t.shape.gap, strut),
+            };
+            let header_bottom = inset + HEADER_TOP + HEADER_H;
+            assert_eq!(nearest - header_bottom, gap, "{name}: chips to the nearest edge below");
+            // And the windows themselves are further away than before (the mockup: 8).
+            assert!(strut + gap - header_bottom > 8.0, "{name}");
+        }
     }
 }

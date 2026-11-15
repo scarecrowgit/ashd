@@ -24,8 +24,8 @@ use ashd_panel_quick_settings::{
     power::{HOLD_MS, PowerCountdown, PowerKind, run_logout},
 };
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
-use ashd_tokens::{LayoutVariant, metrics, motion};
-use ashd_ui::{Icon, anim, hline, icon, label, theme};
+use ashd_tokens::{LayoutVariant, metrics};
+use ashd_ui::{Icon, hline, icon, label, select_plate, theme};
 
 /// Menu width (det-13).
 pub const MENU_W: f32 = 260.0;
@@ -190,8 +190,7 @@ impl SessionPanel {
             .items_center()
             .gap(px(12.))
             .border_l_2()
-            .border_color(if selected { t.accent } else { gpui::transparent_black() })
-            .when_selected(selected, t.surface_2)
+            .border_color(gpui::transparent_black())
             .text_color(ink)
             .cursor_pointer()
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -200,6 +199,12 @@ impl SessionPanel {
                     cx.notify();
                 }
             }))
+            .child(select_plate(
+                gpui::ElementId::NamedInteger("session-plate".into(), ix as u64),
+                selected,
+                t.surface_2,
+                Some(t.accent),
+            ))
             .child(icon(item.icon(), 15.).text_color(icon_ink))
             .child(
                 div()
@@ -228,17 +233,6 @@ impl SessionPanel {
             }
             None => row.on_click(cx.listener(move |this, _, _, cx| this.activate(item, cx))),
         }
-    }
-}
-
-/// Small helper trait so the selected background reads naturally in the builder chain.
-trait WhenSelected {
-    fn when_selected(self, selected: bool, bg: gpui::Hsla) -> Self;
-}
-
-impl WhenSelected for Stateful<Div> {
-    fn when_selected(self, selected: bool, bg: gpui::Hsla) -> Self {
-        if selected { self.bg(bg) } else { self }
     }
 }
 
@@ -363,12 +357,7 @@ impl Render for SessionPanel {
             .bottom(px(bottom))
             .w(px(MENU_W))
             .text_color(t.fg)
-            .child(body)
-            .with_animation(
-                "session-in",
-                anim::tween(motion::timing::SUBMENU_IN, anim::EASE_STANDARD),
-                |el, d| el.opacity(d),
-            );
+            .child(body);
         div().size_full().relative().child(panel)
     }
 }

@@ -27,7 +27,7 @@ use gpui::{
 use ashd_ipc::{PanelOp, Request, Response};
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
 use ashd_tokens::{LayoutVariant, metrics, motion};
-use ashd_ui::{ButtonKind, Icon, anim, button_small, icon_button_kind, label, theme};
+use ashd_ui::{ButtonKind, Icon, Look, anim, button_small, hover_wash, icon_button_kind, label, state_layer, theme};
 
 use crate::{
     ics::{Calendars, Occurrence},
@@ -48,6 +48,8 @@ pub struct CalendarPanelState {
     calendars: Option<Arc<Calendars>>,
     /// Occurrences touching the visible grid, from [`ics::expand`].
     occurrences: Vec<Occurrence>,
+    /// Bumped when another month is shown: the new grid fades in (140 ms). 0 = as opened.
+    page_seq: u64,
 }
 
 pub struct CalendarPanel {
@@ -78,6 +80,7 @@ impl CalendarPanel {
         let month_changed = (day.year(), day.month()) != (self.state.selected.year(), self.state.selected.month());
         self.state.selected = day;
         if month_changed {
+            self.state.page_seq += 1;
             self.refresh_occurrences();
         }
         cx.notify();
@@ -118,6 +121,7 @@ impl Panel for CalendarPanel {
             selected: today(),
             calendars: None,
             occurrences: Vec::new(),
+            page_seq: 0,
         };
         Self { ctx, state }
     }
@@ -138,6 +142,7 @@ impl Panel for CalendarPanel {
     fn on_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.focus.focus(window, cx);
         self.state.selected = today();
+        self.state.page_seq = 0;
         self.refresh_occurrences();
         // The calendars are read off the main thread; the popup is usable meanwhile.
         let task = cx.background_executor().spawn(async { ics::load_dirs(&ics::calendar_dirs()) });
@@ -218,10 +223,17 @@ impl CalendarPanel {
             .justify_center()
             .gap(px(2.))
             .border_1()
-            .border_color(if selected && !is_today { t.accent } else { gpui::transparent_black() })
+            .border_color(gpui::transparent_black())
             .rounded(t.radius_control)
             .when(is_today, |d| d.bg(t.accent))
-            .when(!is_today, |d| d.cursor_pointer().hover(move |s| s.bg(s2)))
+            .child(state_layer(
+                "cal-sel",
+                selected && !is_today,
+                Look::new(gpui::transparent_black(), gpui::transparent_black()),
+                Look::new(gpui::transparent_black(), t.accent),
+                t.radius_control,
+            ))
+            .when(!is_today, |d| d.cursor_pointer().child(hover_wash(s2, None, t.radius_control)))
             .font_family(t.font_mono.clone())
             .text_size(px(12.5))
             .when(is_today, |d| d.font_weight(FontWeight::MEDIUM))
@@ -231,7 +243,7 @@ impl CalendarPanel {
             .on_click(cx.listener(move |this, _, _, cx| this.select(day, cx)))
     }
 
-    fn grid(&self, cx: &mut Context<Self>) -> Div {
+    fn grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx).clone();
         let busy = self.busy_days();
         let now = today();
@@ -274,7 +286,16 @@ impl CalendarPanel {
             }
             grid = grid.child(row);
         }
-        grid
+        match self.state.page_seq {
+            0 => grid.into_any_element(),
+            seq => grid
+                .with_animation(
+                    ElementId::NamedInteger("cal-grid".into(), seq),
+                    anim::tween(motion::timing::PAGE, anim::EASE_STANDARD),
+                    |el, p| el.opacity(p),
+                )
+                .into_any_element(),
+        }
     }
 
     fn agenda(&self, cx: &mut Context<Self>) -> Div {
@@ -377,12 +398,7 @@ impl Render for CalendarPanel {
             .bottom(px(bottom))
             .w(px(CALENDAR_W))
             .text_color(t.fg)
-            .child(body)
-            .with_animation(
-                "calendar-in",
-                anim::tween(motion::timing::SUBMENU_IN, anim::EASE_STANDARD),
-                |el, d| el.opacity(d),
-            );
+            .child(body);
         div().size_full().relative().child(panel)
     }
 }

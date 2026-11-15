@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 use gpui::{
     App, AppContext as _, Bounds, Context, Div, ElementId, Entity, Global, Hsla, InteractiveElement as _, IntoElement,
     MouseExitEvent, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _, Styled as _, Window, canvas,
-    div, point, prelude::FluentBuilder as _, px, size,
+    div, point, px, size,
 };
 use ashd_niri::{
     LiveViews, NiriHandle, NiriState,
@@ -16,7 +16,12 @@ use ashd_niri::{
 };
 use ashd_shell_core::{PanelContext, frame};
 use ashd_tokens::metrics;
-use ashd_ui::{Icon, Theme, icon};
+use ashd_ui::{
+    Icon, Theme,
+    anim::{EASE_OUT_CUBIC, motion::timing},
+    hover_wash, icon,
+    presence::{Presence, Timing},
+};
 use serde::Deserialize;
 
 // ── geometry ──────────────────────────────────────────────────────────────────
@@ -66,6 +71,8 @@ pub fn suppressed(niri: &NiriState, output: Option<&str>) -> bool {
 /// "02 code" — number and name as in the mockups. The number counts the *visible*
 /// workspaces of the output (niri's `idx` also counts the hidden scratch workspace).
 pub fn workspace_label(niri: &NiriState, ws: &Workspace) -> String {
+    // a fullscreen workspace is labelled as its desk
+    let ws = niri.desk(ws.id).unwrap_or(ws);
     let n = niri.visible_number(ws.id).unwrap_or((ws.idx as usize).max(1));
     match ws.name.as_deref().filter(|n| !n.is_empty()) {
         Some(name) => format!("{n:02} {name}"),
@@ -254,7 +261,8 @@ pub fn label_sized(text: impl AsRef<str>, size_px: f32, color: Hsla, t: &Theme) 
 
 /// A square bordered ghost button (desk-05: header prev/next 24, minimap zoom 28) with a
 /// 13px icon. `hovered` comes from [`Hover`].
-pub fn square_button(id: impl Into<ElementId>, ic: Icon, side: f32, hovered: bool, t: &Theme) -> Stateful<Div> {
+pub fn square_button(id: impl Into<ElementId>, ic: Icon, side: f32, _hovered: bool, t: &Theme) -> Stateful<Div> {
+    // (the hover fill is eased by the wash itself; `_hovered` is kept for the callers)
     div()
         .id(id)
         .flex_none()
@@ -266,8 +274,96 @@ pub fn square_button(id: impl Into<ElementId>, ic: Icon, side: f32, hovered: boo
         .border_color(t.line)
         .rounded(frame::nested_radius(t))
         .cursor_pointer()
-        .when(hovered, |d| d.bg(t.surface_2))
+        .child(hover_wash(t.surface_2, Some(t.line), frame::nested_radius(t)))
         .child(icon(ic, 13.).text_color(t.fg))
+}
+
+// ── the Scroll <-> Canvas swap ────────────────────────────────────────────────
+
+/// The chips of a mode come in and go out when the workspace switches between Scroll and
+/// Canvas: 280 ms out-cubic (TOKENS.md §9 "Scroll <-> Canvas"), cross-fading with the other
+/// mode's chips. (GPUI cannot scale a div, so the spec's .96 / 1.04 scale is a 4 px travel.)
+///
+/// `ModeFade` keeps the last content while it leaves; the panel is live (its passive surface
+/// exists) until the exit is over.
+pub struct ModeFade<T> {
+    shown: Option<T>,
+    presence: Presence,
+    /// The exit finished since the last [`Self::take_gone`].
+    gone: bool,
+}
+
+/// What to draw: the content, its opacity, and the movement progress (0..=1).
+pub struct Shown<T> {
+    pub content: T,
+    pub fade: f32,
+    pub travel: f32,
+    /// Leaving: not interactive.
+    pub leaving: bool,
+}
+
+/// Travel (px) of the swap.
+pub const SWAP_TRAVEL: f32 = 4.0;
+
+fn mode_timing() -> Timing {
+    Timing::new(timing::MODE_SWITCH, EASE_OUT_CUBIC)
+}
+
+impl<T: Clone> ModeFade<T> {
+    /// What is there at start does not animate in.
+    pub fn new(initial: Option<T>) -> Self {
+        let now = std::time::Instant::now();
+        let presence = if initial.is_some() {
+            Presence::present(mode_timing(), mode_timing(), now)
+        } else {
+            Presence::absent(mode_timing(), mode_timing(), now)
+        };
+        Self { shown: initial, presence, gone: false }
+    }
+
+    /// The current content (`None`: the mode is not active).
+    pub fn sync(&mut self, current: Option<&T>) {
+        let now = std::time::Instant::now();
+        match current {
+            Some(c) => {
+                if self.shown.is_none() || !self.presence.is_present() {
+                    self.presence.set_present(true, now);
+                }
+                self.shown = Some(c.clone());
+            }
+            None => {
+                if self.shown.is_some() && self.presence.is_present() {
+                    self.presence.set_present(false, now);
+                }
+            }
+        }
+    }
+
+    /// The panel's surface must exist: showing, or still leaving.
+    pub fn is_live(&self) -> bool {
+        self.shown.is_some()
+    }
+
+    /// What to draw now; `None` once nothing is left (then [`Self::take_gone`] says so once).
+    pub fn view(&mut self) -> Option<Shown<T>> {
+        let now = std::time::Instant::now();
+        if self.shown.is_some() && self.presence.is_gone(now) {
+            self.shown = None;
+            self.gone = true;
+        }
+        let (fade, travel, leaving) = (self.presence.value(now), self.presence.movement(now), !self.presence.is_present());
+        self.shown.clone().map(|content| Shown { content, fade, travel, leaving })
+    }
+
+    /// The exit just finished: the caller tells the overlay host to drop the surface.
+    pub fn take_gone(&mut self) -> bool {
+        std::mem::take(&mut self.gone)
+    }
+
+    /// Frames are needed (entering or leaving).
+    pub fn animating(&self) -> bool {
+        self.presence.is_animating(std::time::Instant::now())
+    }
 }
 
 /// The floating chip/card look: `surface` fill, 1px `frame` border.

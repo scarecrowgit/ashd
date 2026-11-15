@@ -48,6 +48,20 @@ pub const PILL_ACTIVE_H: f32 = 28.0;
 pub const PILL_LABEL_GAP: f32 = 5.0;
 pub const PILL_LABEL_SIZE: f32 = 10.0;
 
+// ── fullscreen entry (every variant): a compact row under its origin desk ──
+/// Height of the entry of a fullscreen workspace: much smaller than a desk button, so it
+/// reads as belonging to the desk above it.
+pub const FS_H: f32 = 34.0;
+/// The app icon of the fullscreen window.
+pub const FS_ICON: f32 = 16.0;
+/// Connector (a 1 px elbow in `line`, `accent` while active) from the desk above to the icon:
+/// x of its vertical stem inside the rail, and the length of the horizontal foot.
+pub const FS_STEM_X: f32 = 14.0;
+pub const FS_FOOT: f32 = 8.0;
+/// The active marker of a fullscreen entry is inset this much top and bottom (a desk's is
+/// [`ACTIVE_BAR_INSET`]).
+pub const FS_BAR_INSET: f32 = 7.0;
+
 /// "New workspace" button: 36×36 dashed, 14 from the bottom, 14px plus (every variant).
 pub const NEW_BUTTON: f32 = 36.0;
 pub const NEW_BUTTON_BOTTOM: f32 = 14.0;
@@ -90,9 +104,29 @@ pub fn button_h(variant: RailVariant) -> f32 {
     }
 }
 
-/// Rail-local y of workspace button `index`.
+/// Rail-local y of workspace button `index` when every entry is a desk.
 pub fn button_top(variant: RailVariant, index: usize) -> f32 {
     BUTTONS_TOP + index as f32 * (button_h(variant) + BUTTON_GAP)
+}
+
+/// Height of an entry: a desk button, or the compact fullscreen entry.
+pub fn entry_h(variant: RailVariant, fullscreen: bool) -> f32 {
+    if fullscreen { FS_H } else { button_h(variant) }
+}
+
+/// Rail-local `(top, height)` of every entry; `fullscreen[i]` says entry `i` is a fullscreen
+/// workspace's.
+pub fn entry_boxes(variant: RailVariant, fullscreen: &[bool]) -> Vec<(f32, f32)> {
+    let mut y = BUTTONS_TOP;
+    fullscreen
+        .iter()
+        .map(|&fs| {
+            let h = entry_h(variant, fs);
+            let top = y;
+            y += h + BUTTON_GAP;
+            (top, h)
+        })
+        .collect()
 }
 
 /// Horizontal distance rail edge → flyout card (the hover bridge).
@@ -106,6 +140,11 @@ pub fn flyout_offset_x(t: &Theme) -> f32 {
 /// Header border inset (0 on attached rails).
 pub fn header_inset(t: &Theme) -> f32 {
     if t.layout == LayoutVariant::Floating { HEADER_INSET_FLOATING } else { 0.0 }
+}
+
+/// Height of the flyout card of a fullscreen workspace: title, one window row, one action.
+pub fn flyout_height_fullscreen() -> f32 {
+    2.0 * FLYOUT_PAD + metrics::type_scale::TITLE.1 + FLYOUT_GAP + metrics::ROW_H + FLYOUT_GAP + 1.0 + FLYOUT_GAP + ACTION_H + 2.0
 }
 
 /// Height of a flyout card with `rows` window rows (for keeping it on screen).
@@ -139,6 +178,21 @@ mod tests {
         assert_eq!(tops(RailVariant::Thumb)[..2], [60.0, 140.0]);
         // desk-07 (pill): o1 114.
         assert_eq!(tops(RailVariant::Pill)[1], 114.0);
+    }
+
+    #[test]
+    fn desks_keep_their_board_positions_and_a_fullscreen_entry_is_compact() {
+        for v in [RailVariant::Num, RailVariant::Thumb, RailVariant::Pill] {
+            // no fullscreen entry: exactly the measured positions
+            let boxes = entry_boxes(v, &[false; 4]);
+            assert_eq!(boxes.iter().map(|b| b.0).collect::<Vec<_>>(), (0..4).map(|i| button_top(v, i)).collect::<Vec<_>>());
+            // one in the middle pushes what follows by its own height + gap, nothing else
+            let with = entry_boxes(v, &[false, true, false]);
+            assert_eq!(with[0], boxes[0]);
+            assert_eq!(with[1], (button_top(v, 1), FS_H));
+            assert_eq!(with[2].0, button_top(v, 1) + FS_H + BUTTON_GAP);
+            assert!(FS_H < button_h(v) * 0.75, "visually subordinate");
+        }
     }
 
     #[test]

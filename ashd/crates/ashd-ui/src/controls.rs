@@ -14,6 +14,7 @@ use gpui::{
 };
 
 use crate::{
+    fx::hover_wash,
     icons::{Icon, icon},
     metrics,
     theme::{Theme, theme},
@@ -164,6 +165,10 @@ fn build_button(
         .whitespace_nowrap()
         .relative();
     el = if icon_only { el.w(px(metrics::ICON_BUTTON)) } else { el.px(px(12.)) };
+    if live {
+        // The hover / pressed fill eases in over 80 ms (behind the content: first child).
+        el = el.child(hover_wash(hover.bg, Some(pressed.bg), (t.radius_control - px(1.)).max(px(0.))));
+    }
     el = match content {
         Content::Text(text) => el.child(text),
         Content::IconText(ic, text) => el.child(icon(ic, metrics::icon_size::DENSE).text_color(fg)).child(text),
@@ -176,11 +181,7 @@ fn build_button(
         _ => {}
     }
     if live {
-        let (h, p) = (hover, pressed);
-        el = el
-            .cursor_pointer()
-            .hover(move |s| s.bg(h.bg).border_color(h.border))
-            .active(move |s| s.bg(p.bg).border_color(p.border).top(px(1.)));
+        el = el.cursor_pointer().active(|s| s.top(px(1.)));
     } else if state != ControlState::Disabled {
         el = el.cursor_pointer();
     }
@@ -445,7 +446,7 @@ pub fn segmented_icons(
                 .cursor_pointer()
                 .text_color(fg)
                 .when(active, |d| d.bg(t.accent))
-                .when(!active, |d| d.hover(move |s| s.bg(s2)))
+                .when(!active, |d| d.child(hover_wash(s2, None, (t.radius_control - px(1.)).max(px(0.)))))
                 .when_some(seg.icon, |d, ic| d.child(icon(ic, metrics::icon_size::DENSE).text_color(fg)))
                 .child(seg.label)
                 .on_click(move |_: &ClickEvent, window, cx| on_select(&ix, window, cx))

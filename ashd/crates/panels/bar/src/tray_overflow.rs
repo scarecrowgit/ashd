@@ -5,17 +5,15 @@
 //! Keyboard: Up / Down, Enter, Escape.
 
 use gpui::{
-    AnimationExt as _, ClickEvent, Context, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ClickEvent, Context, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, Render, ScrollEvent, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::*, px,
 };
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
 use ashd_svc_tray::{Status, TrayItem};
-use ashd_tokens::{LayoutVariant, metrics, motion::timing};
+use ashd_tokens::{LayoutVariant, metrics};
 use ashd_ui::{
-    Theme,
-    anim::{EASE_OUT_QUAD, tween},
-    app_icon, menu, theme,
+    Theme, app_icon, menu, theme,
 };
 
 use crate::tray::{Button, TrayUi, popup_bottom};
@@ -63,8 +61,7 @@ impl TrayOverflowPanel {
             .text_size(px(metrics::type_scale::UI.0))
             .text_color(t.fg)
             .cursor_pointer()
-            .when(selected, |d| d.bg(s2))
-            .when(!selected, move |d| d.hover(move |s| s.bg(s2)))
+            .child(ashd_ui::select_plate(ElementId::NamedInteger("tray-overflow-plate".into(), ix as u64), selected, s2, None))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered && this.selected != ix {
                     this.selected = ix;
@@ -162,8 +159,7 @@ impl Render for TrayOverflowPanel {
                 }
                 cx.notify();
             }))
-            .children(rows)
-            .with_animation("tray-overflow-in", tween(timing::SUBMENU_IN, EASE_OUT_QUAD), |el, p| el.opacity(p));
+            .children(rows);
         root.child(panel)
     }
 }

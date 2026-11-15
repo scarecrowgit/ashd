@@ -20,7 +20,7 @@ mod format;
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    AnimationExt as _, AnyElement, Bounds, Context, Div, ElementId, FocusHandle, FontWeight, InteractiveElement as _,
+    AnyElement, Bounds, Context, Div, ElementId, FocusHandle, FontWeight, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _,
     Pixels, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, img,
     prelude::*, px, relative,
@@ -28,8 +28,8 @@ use gpui::{
 use ashd_ipc::{MediaControl, PanelOp, Request, Response};
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
 use ashd_svc_mpris::{MprisState, Player, PlaybackStatus};
-use ashd_tokens::{LayoutVariant, metrics, motion};
-use ashd_ui::{Icon, anim, icon, label, theme};
+use ashd_tokens::{LayoutVariant, metrics};
+use ashd_ui::{Icon, hover_wash, icon, label, theme};
 
 // Card width (det-11: 340): the shared metric.
 use ashd_tokens::metrics::MEDIA_W as CARD_W;
@@ -133,7 +133,8 @@ fn transport_button(id: &'static str, ic: Icon, kind: Kind, enabled: bool, cx: &
         .when(kind == Kind::Primary, |d| d.bg(t.accent))
         .when(!enabled, |d| d.opacity(0.4))
         .when(enabled, |d| {
-            d.cursor_pointer().hover(move |s| if kind == Kind::Primary { s.opacity(0.88) } else { s.bg(hover_bg) })
+            let wash = if kind == Kind::Primary { ashd_ui::mix(t.accent, gpui::black(), 0.12) } else { hover_bg };
+            d.cursor_pointer().child(hover_wash(wash, None, t.radius_control))
         })
         .child(icon(ic, 14.).text_color(fg))
 }
@@ -336,7 +337,7 @@ impl MediaPanel {
                 .font_family(t.font_sans.clone())
                 .text_size(px(metrics::type_scale::UI.0))
                 .text_color(if is_current { t.accent } else { t.fg })
-                .hover(move |s| s.bg(s2))
+                .child(hover_wash(s2, None, t.radius_control))
                 .child(
                     div()
                         .font_family(t.font_mono.clone())
@@ -448,8 +449,7 @@ impl Render for MediaPanel {
             .w(px(CARD_W))
             .font_family(t.font_sans.clone())
             .text_color(t.fg)
-            .child(body)
-            .with_animation("media-in", anim::tween(motion::timing::SUBMENU_IN, anim::EASE_STANDARD), |el, d| el.opacity(d));
+            .child(body);
         // The root also follows a drag that leaves the card.
         div()
             .size_full()

@@ -13,7 +13,7 @@ use ashd_tokens::metrics;
 use ashd_ui::{
     Icon,
     anim::{EASE_OUT_QUAD, EASE_STANDARD, timing, tween},
-    icon, theme,
+    hover_wash, icon, theme,
 };
 
 use crate::{geom, hover::RailHover, rename, workspace_title};
@@ -31,18 +31,19 @@ struct Row {
 }
 
 impl RailFlyoutPanel {
-    /// Card bounds in output-local px for button `index` with `rows` rows.
-    fn card_bounds(&self, index: usize, rows: usize, cx: &App) -> Option<Bounds<gpui::Pixels>> {
+    /// Card bounds in output-local px for the entry whose rail-local top is `top`, with
+    /// `rows` window rows (`fullscreen`: the compact card of a fullscreen workspace).
+    fn card_bounds(&self, top: f32, rows: usize, fullscreen: bool, cx: &App) -> Option<Bounds<gpui::Pixels>> {
         let t = theme(cx);
         let info = self.ctx.shell.display(self.ctx.display.as_ref()?.id, cx)?;
         let rail = info.rail_to_output(
             Bounds {
-                origin: point(px(0.), px(geom::button_top(t.rail, index))),
-                size: size(t.rail_w, px(geom::button_h(t.rail))),
+                origin: point(px(0.), px(top)),
+                size: size(t.rail_w, px(geom::entry_h(t.rail, fullscreen))),
             },
             t,
         );
-        let h = px(geom::flyout_height(rows));
+        let h = px(if fullscreen { geom::flyout_height_fullscreen() } else { geom::flyout_height(rows) });
         let x = rail.origin.x + t.rail_w + px(geom::flyout_offset_x(t));
         let mut y = rail.origin.y + px(geom::FLYOUT_OFFSET_Y);
         // Keep the card above the bar.
@@ -80,7 +81,7 @@ impl Render for RailFlyoutPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().size_full().relative();
         let h = self.hover.read(cx);
-        let (Some((ws_id, index)), closing, generation) = (h.shown, h.closing, h.generation) else {
+        let (Some((ws_id, top)), closing, generation) = (h.shown, h.closing, h.generation) else {
             return root;
         };
         let t = theme(cx).clone();
@@ -89,7 +90,10 @@ impl Render for RailFlyoutPanel {
         let strip = niri.strip(ws_id);
         let canvas = niri.is_canvas(ws_id);
         let canvas_windows = niri.canvas_windows(ws_id);
-        let ws_number = niri.visible_number(ws_id).map_or(ws.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
+        let fullscreen = ws.fullscreen_origin_id.is_some();
+        let ws_number = niri.desk_number(ws_id).map_or(ws.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
+        let origin_name = niri.desk(ws_id).and_then(|d| d.name.clone()).filter(|n| !n.is_empty());
+        let leaving_window = niri.fullscreen_window(ws_id).or_else(|| niri.windows_on(ws_id).into_iter().next()).map(|w| w.id);
         let ws_focused = ws.is_focused;
         let apps = self.ctx.services.apps.state.read(cx).apps.clone();
         let rows: Vec<Row> = niri
@@ -108,7 +112,7 @@ impl Render for RailFlyoutPanel {
                 }
             })
             .collect();
-        let Some(card) = self.card_bounds(index, rows.len(), cx) else { return root };
+        let Some(card) = self.card_bounds(top, rows.len(), fullscreen, cx) else { return root };
         let active_window = ws.active_window_id;
         let total: f64 = strip.columns.iter().map(|c| c.width.max(1.0)).sum();
         let (s2, muted, fg, line) = (t.surface_2, t.fg_muted, t.fg, t.line);
@@ -118,7 +122,14 @@ impl Render for RailFlyoutPanel {
             .text_size(px(geom::FLYOUT_META_SIZE))
             .text_color(muted)
             .child({
-                if canvas {
+                if fullscreen {
+                    let text = match &origin_name {
+                        Some(n) => format!("fullscreen · {ws_number:02} {n}"),
+                        None if ws_number > 0 => format!("fullscreen · {ws_number:02}"),
+                        None => "fullscreen".to_string(),
+                    };
+                    t.label_text(&text)
+                } else if canvas {
                     let n = canvas_windows.len();
                     t.label_text(&format!("canvas · {n} {}", if n == 1 { "window" } else { "windows" }))
                 } else {
@@ -137,7 +148,11 @@ impl Render for RailFlyoutPanel {
                     .line_height(px(metrics::type_scale::TITLE.1))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg)
-                    .child(workspace_title(ws_number, ws.name.as_deref())),
+                    .child(if fullscreen {
+                        rows.first().map(|r| r.title.clone()).unwrap_or_else(|| "fullscreen".into())
+                    } else {
+                        workspace_title(ws_number, ws.name.as_deref())
+                    }),
             )
             .child(meta);
 
@@ -199,7 +214,9 @@ impl Render for RailFlyoutPanel {
                         .text_size(px(metrics::type_scale::UI.0))
                         .cursor_pointer()
                         .when(r.active, |d| d.bg(s2).text_color(fg))
-                        .when(!r.active, |d| d.text_color(muted).hover(move |s| s.bg(s2).text_color(fg)))
+                        .when(!r.active, |d| {
+                            d.text_color(muted).hover(move |s| s.text_color(fg)).child(hover_wash(s2, None, t.radius_control))
+                        })
                         .child(icon(r.glyph, geom::ROW_ICON).text_color(if r.active { fg } else { muted }))
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(r.title))
                         .child(
@@ -232,7 +249,7 @@ impl Render for RailFlyoutPanel {
                 .font_family(t.font_sans.clone())
                 .text_size(px(geom::ACTION_TEXT))
                 .text_color(if enabled { fg } else { muted })
-                .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(s2)))
+                .when(enabled, |d| d.cursor_pointer().child(hover_wash(s2, None, t.radius_control)))
                 .child(text)
         };
         let ws_ref = WorkspaceReferenceArg::Id(ws_id);
@@ -282,6 +299,18 @@ impl Render for RailFlyoutPanel {
                 },
             )));
 
+        // A fullscreen workspace: one action, back to its desk (the compositor moves the window back).
+        let leave = div()
+            .flex()
+            .pt(px(geom::FLYOUT_GAP))
+            .border_t_1()
+            .border_color(line)
+            .child(action("rail-flyout-leave", "Leave fullscreen", leaving_window.is_some()).on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(id) = leaving_window {
+                    this.ctx.shell.niri_action(Action::FullscreenWindow { id: Some(id) }, cx);
+                }
+                this.hover.update(cx, |h, cx| h.dismiss(cx));
+            })));
         let card_el = div()
             .w(px(geom::FLYOUT_W))
             .p(px(geom::FLYOUT_PAD))
@@ -294,9 +323,9 @@ impl Render for RailFlyoutPanel {
             .rounded(t.radius_panel)
             .shadow(t.shadow_flyout())
             .child(header)
-            .child(strip_el)
+            .when(!fullscreen, |d| d.child(strip_el))
             .child(list)
-            .child(actions);
+            .child(if fullscreen { leave.into_any_element() } else { actions.into_any_element() });
 
         // The hit area includes the 16px bridge to the rail, so the pointer can travel
         // from the button to the card without leaving both.

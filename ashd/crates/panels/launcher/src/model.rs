@@ -26,9 +26,14 @@ pub enum Act {
     FocusWindow(u64),
     /// Spawn this argv through niri.
     Spawn(Vec<String>),
-    /// A typed command line: shell-less argv when possible, the user's shell otherwise.
+    /// A typed command line, run here: its output is shown in the launcher
+    /// (`runner`, `sh -lc`).
     Run(String),
-    /// Like [`Act::Run`], inside the configured terminal.
+    /// A typed command line, detached and silent: shell-less argv when possible, the user's
+    /// shell otherwise, spawned through niri. Shift+Enter.
+    RunDetached(String),
+    /// A typed command line in the configured terminal, which stays open after the command
+    /// exits (`kitty --hold sh -lc …`). Ctrl+Enter.
     RunInTerminal(String),
     /// Copy to the clipboard (`wl-copy`).
     Copy(String),
@@ -50,6 +55,8 @@ pub struct Row {
     pub primary: Act,
     /// Shift+Enter.
     pub alt: Option<Act>,
+    /// Ctrl+Enter.
+    pub ctrl: Option<Act>,
 }
 
 impl Row {
@@ -63,6 +70,7 @@ impl Row {
             section: None,
             primary,
             alt: None,
+            ctrl: None,
         }
     }
     pub fn matched(mut self, m: Vec<u32>) -> Self {
@@ -76,6 +84,16 @@ impl Row {
     pub fn alt(mut self, a: Act) -> Self {
         self.alt = Some(a);
         self
+    }
+    pub fn ctrl(mut self, a: Act) -> Self {
+        self.ctrl = Some(a);
+        self
+    }
+    /// A command row: Enter runs it here, Ctrl+Enter in a terminal, Shift+Enter detached.
+    pub fn command(icon: RowIcon, title: impl Into<String>, subtitle: impl Into<String>, line: &str) -> Self {
+        Self::new(icon, title, subtitle, Act::Run(line.to_string()))
+            .alt(Act::RunDetached(line.to_string()))
+            .ctrl(Act::RunInTerminal(line.to_string()))
     }
     pub fn section(mut self, s: &'static str) -> Self {
         self.section = Some(s);
@@ -207,6 +225,23 @@ pub fn plan_run(line: &str, shell: &str) -> Option<Vec<String>> {
     shlex::split(line).filter(|a| !a.is_empty())
 }
 
+/// argv that runs `line` in the terminal `prefix` and keeps its window open afterwards:
+/// `kitty --hold sh -lc <line>`. The line is one argv element (no quoting involved).
+pub fn terminal_run_argv(prefix: &[String], line: &str) -> Option<Vec<String>> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(ashd_svc_apps::in_terminal_hold(prefix, &crate::runner::sh_argv(line)))
+}
+
+/// Does a query read as a command line rather than an application name: arguments, or
+/// shell syntax?
+pub fn looks_like_command(q: &str) -> bool {
+    let q = q.trim();
+    q.split_whitespace().nth(1).is_some() || needs_shell(q)
+}
+
 /// Percent-encode a query for a URL component.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
@@ -315,6 +350,35 @@ mod tests {
         assert_eq!(plan_run("echo \"open", "sh"), Some(vec!["sh".into(), "-c".into(), "echo \"open".into()]));
         assert_eq!(plan_run("  ", "sh"), None);
         assert!(!needs_shell("kitty --title=a=b"));
+    }
+
+    #[test]
+    fn terminal_lines_stay_one_argument() {
+        let kitty = vec!["kitty".to_string()];
+        let nasty = "echo 'a b' \"c\" $HOME | wc -l";
+        assert_eq!(
+            terminal_run_argv(&kitty, &format!("  {nasty} \n")),
+            Some(["kitty", "--hold", "sh", "-lc", nasty].map(String::from).to_vec())
+        );
+        assert_eq!(terminal_run_argv(&kitty, "   "), None);
+    }
+
+    #[test]
+    fn commands_are_told_from_app_names() {
+        assert!(looks_like_command("ls -la"));
+        assert!(looks_like_command("ls|wc"));
+        assert!(looks_like_command("FOO=1 env"));
+        assert!(!looks_like_command("firefox"));
+        assert!(!looks_like_command("  gparted "));
+    }
+
+    #[test]
+    fn command_rows_carry_three_actions() {
+        let r = Row::command(RowIcon::Glyph(Icon::Terminal), "ls", "", "ls");
+        assert_eq!(
+            (r.primary, r.alt, r.ctrl),
+            (Act::Run("ls".into()), Some(Act::RunDetached("ls".into())), Some(Act::RunInTerminal("ls".into())))
+        );
     }
 
     #[test]

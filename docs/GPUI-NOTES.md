@@ -211,6 +211,68 @@ input.focus_handle(cx).focus(window, cx);
   the leave it dispatches one synthetic mouse move far outside the window. Panels use plain
   GPUI hover APIs.
 
+## 5b. Motion (what is known about animation and re-rendering at this rev)
+
+Verified in the nested session (`cargo xtask motion`, `ASHD_FRAME_LOG=1`); sources under
+`crates/gpui/src/{elements/animation.rs,window.rs}`.
+
+- **A draw re-renders every view that is not `.cached()`.** `SurfaceRoot::render` runs once per
+  frame drawn, so counting it (`ashd_shell_core::framelog`) counts frames per surface. A window
+  is drawn only when something notified a view, called `window.refresh()` /
+  `request_animation_frame()`, or an event changed state; a settled shell logs `0` for every
+  surface. Anything that keeps asking for frames shows up there at once.
+- **`request_animation_frame()` only inside render / prepaint / paint** (G2) and it is the only
+  way to keep a frame loop going without a notify; each animating element asks again for the next
+  frame and stops asking when it is done. Time-based values (`Instant::now()` in the element) make
+  the motion identical at 60 and 180 Hz.
+- **`with_animation(id, Animation, f)`**: state (start time) lives in element state keyed by the
+  element's *global id* (the ancestors' ids + its own); a new id restarts it, the same id never
+  does. Element state "exists as long as this element is being rendered in consecutive frames"
+  (GPUI's own doc on `use_keyed_state`): a popup that is closed and rendered again starts over.
+  After a oneshot ends it keeps returning `1.0` and stops asking for frames. **`App::reduce_motion()` (GPUI's own flag, never set by the shell) makes every
+  `with_animation` jump to its end state** — the shell's reduced motion is `ashd_ui::anim`.
+- **Custom `Element`s may keep state with `window.with_element_state(global_id, …)` in
+  `request_layout`, `prepaint` and `paint`** and must return `Some(ElementId)` from `id()`; the id
+  only has to be unique among the siblings under the nearest ancestor that has an id. That is how
+  `ashd_ui::fx` does everything without a field in a panel: `HoverWash` (hitbox + eased alpha),
+  `Flip` (offsets the child's prepaint with `window.with_element_offset`), `Follow`, `Reveal`.
+- **Two elements with the same id under the same id'd ancestor share one state — and nothing
+  warns.** `meter(cpu)` and `meter(mem)` in the bar had no element id between them; the first
+  version of the eased meter (`Follow` with a constant id) therefore retargeted *one* tween between
+  the two values on every frame and the bar drew 60 fps for ever. It showed up at once in
+  `ASHD_FRAME_LOG` (`bar=62`, everything else 0). `fx::fill_bar` paints its own quad and keeps its
+  tween per *position* (rounded origin) inside the shared state, so id-less callers work; every
+  other `fx` element documents that it needs an id'd parent (or an explicit unique id).
+- **`.hover(|s| …)` is instant** and `Interactivity::on_hover` accepts **one** listener per element
+  (a second one trips a `debug_assert`), so an eased hover cannot ride on either. `HoverWash` paints
+  a quad (`window.paint_quad`) with the eased alpha from its own `insert_hitbox` +
+  `is_hovered`, registers a `MouseMoveEvent` listener that `window.refresh()`es when the
+  hover flips (the `Div` does the same for `.hover()` styles) and must be the *first child*: children
+  paint in order, so a wash added after the label would tint the text. It needs the control to have
+  an element id (the state path).
+- **Layout offsets for glides**: `window.element_offset()` is the scroll offset of the ancestors;
+  `layout origin = bounds.origin - element_offset()` is stable while scrolling, so a FLIP does not
+  mistake scrolling for a move. `with_element_offset` is prepaint-only and moves everything the
+  child inserts (hitboxes, bounds) — the child is clickable where it is drawn.
+- **A clipped, measured block** (`Reveal`): the wrapper's own layout node gets
+  `overflow: Clip` + `size.height = natural * p`; the natural height is read in `prepaint` from the
+  child's `layout_bounds` (the child keeps its size inside the clipped parent) and stored for the
+  next frame; `with_content_mask` clips both prepaint (hit-testing) and paint.
+- **A layer surface can be kept alive while its content animates out** (modals, scratchpad):
+  `window.set_input_region(Some(&[]))` makes it click-through, `set_exclusive_zone` can be changed
+  at any time (windows re-flow immediately), keyboard interactivity cannot — a leaving OnDemand /
+  Exclusive surface keeps the keyboard until it is removed, so the exits are short (≤ 100 ms for
+  modals; the scratchpad is removed when its spring is within 0.5 % of the edge).
+- **`Instant` vs `scheduler::Instant`**: shell code uses `std::time::Instant` for its own clocks;
+  GPUI's `with_animation` uses the executor clock. Both are the monotonic clock in the real shell.
+- **A frame count is the evidence, not a guess**: with `ASHD_FRAME_LOG=1` a settled desktop logs
+  `rail=0 scratchpad=0 overlay-*=0` and the bar only draws when live data arrives (the 1 Hz system
+  sample: 2 draws, plus the 160 ms ease of the cpu / mem meters when a value moved). Anything that
+  holds a frame loop is ~60 per second, every second.
+- Slow-motion for tests: `ASHD_MOTION_SCALE=N` multiplies every `anim::duration_ms` and slows
+  `SpringValue`; animations that build `gpui::Animation::new(..)` by hand ignore it (toast timer,
+  critical pulse, scratchpad stagger).
+
 ## 6. ashd-shell end-to-end (M0 definition of done)
 
 `ashd-shell` (all 22 panels registered, services on) in the nested session:
@@ -243,3 +305,51 @@ fork, needed for `workspace "scratch" { hidden }`) inside it with `xtask/assets/
 `ASHD_NESTED=1`, `ASHD_FAKE_POWER=1`, `ASHD_NO_RELOAD=1` are set. Input: `wlrctl pointer
 move/click`, `wtype`. GPU rendering works headless on this machine (RADV Vulkan through the
 render node; no lavapipe needed). `shot-check` and `smoke` drive the same session.
+
+
+## Motion kit, wave 2 findings (shell crates)
+
+- **`.hover()` is instant and one `on_hover` per element.** Every hover in the shell crates is
+  now `fx::hover_wash` / `hover_ring` as the first child of an element with an id; where a hover
+  also needs a callback (tray tooltips, the minimap's card) the callback stays on `on_hover` and
+  the wash is a child, so both work.
+- **GPUI cannot scale a div.** The design's "scale .96 / 1.04" swaps (mode chip, glyphs) are a
+  4 px travel plus the cross-fade (`fx::swap`, `SWAP_TRAVEL`). Only text and SVG scale.
+- **A custom `Element`'s state key must be unique under the nearest id'd ancestor.** Two `swap`s
+  with the same id inside one id'd parent share state silently (the second reads the first's
+  key and never animates): give every swap its own id (`"launcher-lead"`, `"minimap-body"`, ...).
+- **Real-time timers next to scaled tweens.** The OSD closed itself with
+  `timer(OSD_OUT)` while its fade-out ran on `duration_ms(OSD_OUT)`: invisible at scale 1, but with
+  `ASHD_MOTION_SCALE` (and with reduced motion the other way round) the surface was dropped
+  mid-fade. Any timer that destroys a surface after an animation must use `anim::duration_ms`.
+- **`PresenceList::sync` primes on its first call.** A list created lazily (the tray only syncs
+  once something is present) swallows the very first arrival without animating it: sync it with
+  an empty list in the constructor.
+- **A `Presence` that decides layout needs its ghosts in the layout.** The overflow chevron is the
+  tray's only visible part on a crowded bar; without its own presence it popped in and out
+  while the icons beside it eased.
+- **niri hides Top layers under a fullscreen window by itself**, so the bar's fade on entering
+  fullscreen cannot be seen (only the return can); the harness checks the return.
+- **wlrctl in the nested session**: `wlrctl keyboard type "text\n"` types into the focused layer
+  surface (a newline is Enter); there is no way to send arrow keys, so selection moves are
+  tested with pointer motion (the launcher selects the hovered row).
+
+## Fullscreen next to the compositor (fork `fullscreen-workspaces` + `edge-reveal`)
+
+- **Which layer decides who may react.** The bar and rail are Top-layer surfaces: over a fullscreen
+  window niri covers them and, with `edge-reveal`, slides them in again on an edge dwell. If the shell
+  blanks them on its own (it used to: a "fullscreen" flag from IPC), the revealed panel is empty. They
+  render the same at all times now. The strip header, canvas chip, minimap, OSD and toasts share the
+  *Overlay*-layer passive surface, which niri draws over fullscreen windows: the first three step aside
+  (`frame::is_fullscreen`, a `ModeFade` so nothing pops), the OSD and toasts stay.
+- **`idx` is not a position any more.** Hidden and fullscreen workspaces have `idx` 0: sorting by
+  `idx` puts them first, numbering by position moves the other desks' numbers. Use
+  `NiriState::workspaces_on` (on-screen order), `visible_number` (desks only) and `desk_number`.
+- **A button list is not uniform any more.** The rail's geometry (active marker, flyout anchor) comes
+  from `geom::entry_boxes`, one `(top, height)` per entry; the hover entity carries the entry's top, not
+  its index.
+- **wlrctl relative moves**: going to a position through the output's corner rests the pointer at the
+  left edge for a moment, which is a reveal trigger. The harness keeps the pointer position and moves
+  relatively.
+- The compositor keeps a revealed panel while the pointer is over *any* revealed panel (the rail stays
+  while the pointer is on the revealed bar).

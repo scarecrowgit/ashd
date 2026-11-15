@@ -134,49 +134,82 @@ impl NiriState {
         known.then_some(event)
     }
 
-    /// Visible workspaces of `output`, in on-screen order (`idx`). Hidden (scratchpad)
+    /// Visible workspaces of `output`, in on-screen order. Hidden (scratchpad)
     /// workspaces are left out: they are never shown or navigated to; see
-    /// [`Self::workspaces_on_including_hidden`].
+    /// [`Self::workspaces_on_including_hidden`]. A fullscreen workspace (`idx` 0, see
+    /// [`is_fullscreen_workspace`]) stands right after the workspace it came from.
     pub fn workspaces_on(&self, output: &str) -> Vec<&Workspace> {
         let mut v = self.workspaces_on_including_hidden(output);
         v.retain(|w| !w.is_hidden);
         v
     }
 
-    /// Every workspace of `output`: the visible ones in `idx` order, then the hidden ones
+    /// Every workspace of `output`: the visible ones in on-screen order, then the hidden ones
     /// (the ashd fork gives hidden workspaces `idx` 0; older forks numbered them in line).
     pub fn workspaces_on_including_hidden(&self, output: &str) -> Vec<&Workspace> {
-        let mut v: Vec<_> =
-            self.workspaces.values().filter(|w| w.output.as_deref() == Some(output)).collect();
-        v.sort_by_key(|w| (w.is_hidden, w.idx));
-        v
+        screen_order(self.workspaces.values().filter(|w| w.output.as_deref() == Some(output)).collect())
     }
 
-    /// All visible (non-hidden) workspaces sorted by (output, idx).
+    /// All visible (non-hidden) workspaces sorted by (output, on-screen order).
     pub fn workspaces_sorted(&self) -> Vec<&Workspace> {
         let mut v = self.workspaces_sorted_including_hidden();
         v.retain(|w| !w.is_hidden);
         v
     }
 
-    /// All workspaces sorted by (output, hidden last, idx).
+    /// All workspaces sorted by (output, on-screen order, hidden last).
     pub fn workspaces_sorted_including_hidden(&self) -> Vec<&Workspace> {
-        let mut v: Vec<_> = self.workspaces.values().collect();
-        v.sort_by(|a, b| a.output.cmp(&b.output).then((a.is_hidden, a.idx).cmp(&(b.is_hidden, b.idx))));
-        v
+        let mut outputs: Vec<&Option<String>> = self.workspaces.values().map(|w| &w.output).collect();
+        outputs.sort();
+        outputs.dedup();
+        outputs
+            .into_iter()
+            .flat_map(|o| screen_order(self.workspaces.values().filter(|w| &w.output == o).collect()))
+            .collect()
     }
 
-    /// The number to show for workspace `id`: its 1-based position among the visible
-    /// workspaces of its output — never 0. Computed from the sorted visible list so it is right
+    /// The number to show for workspace `id`: its 1-based position among the *numbered*
+    /// visible workspaces of its output — never 0. Computed from the sorted list so it is right
     /// with every niri: a stock one (no hidden workspaces), the current fork (`idx` is the
-    /// visual index, 0 for hidden ones) and older forks that counted hidden ones in `idx`.
-    /// `None` for hidden or unknown workspaces.
+    /// visual index, 0 for hidden and fullscreen ones) and older forks that counted hidden ones
+    /// in `idx`. `None` for hidden, fullscreen (they have no number, see
+    /// [`Self::desk_number`]) and unknown workspaces.
     pub fn visible_number(&self, id: u64) -> Option<usize> {
-        let ws = self.workspaces.get(&id).filter(|w| !w.is_hidden)?;
-        let mut v: Vec<_> =
-            self.workspaces.values().filter(|w| w.output == ws.output && !w.is_hidden).map(|w| (w.idx, w.id)).collect();
+        let ws = self.workspaces.get(&id).filter(|w| !w.is_hidden && !is_fullscreen_workspace(w))?;
+        let mut v: Vec<_> = self
+            .workspaces
+            .values()
+            .filter(|w| w.output == ws.output && !w.is_hidden && !is_fullscreen_workspace(w))
+            .map(|w| (w.idx, w.id))
+            .collect();
         v.sort_unstable();
         v.iter().position(|(_, wid)| *wid == id).map(|p| p + 1)
+    }
+
+    /// The desk a workspace belongs to: itself, or for a fullscreen workspace the workspace its
+    /// window came from (followed through fullscreen workspaces that came from one another).
+    /// `None` when that desk is gone or `id` is unknown.
+    pub fn desk(&self, id: u64) -> Option<&Workspace> {
+        let mut ws = self.workspaces.get(&id)?;
+        for _ in 0..8 {
+            if !is_fullscreen_workspace(ws) {
+                return Some(ws);
+            }
+            ws = self.workspaces.get(&ws.fullscreen_origin_id?)?;
+        }
+        None
+    }
+
+    /// The number of [`Self::desk`]: what labels like `02 code` show for a fullscreen
+    /// workspace (its origin's number).
+    pub fn desk_number(&self, id: u64) -> Option<usize> {
+        self.visible_number(self.desk(id)?.id)
+    }
+
+    /// The window a fullscreen workspace was created for (`None` on an ordinary workspace and
+    /// on a fullscreen one whose window just left).
+    pub fn fullscreen_window(&self, id: u64) -> Option<&Window> {
+        self.windows.get(&self.workspaces.get(&id)?.fullscreen_window_id?)
     }
 
     /// Hidden (scratchpad) workspaces sorted by (output, idx).
@@ -277,6 +310,43 @@ impl NiriState {
     }
 }
 
+/// A workspace the compositor made for a fullscreen window (`fullscreen-workspaces`): `idx` 0,
+/// visible, right after its origin, always a strip.
+pub fn is_fullscreen_workspace(w: &Workspace) -> bool {
+    w.fullscreen_origin_id.is_some()
+}
+
+/// `v` (the workspaces of one output) in on-screen order: numbered ones by `idx`, a fullscreen
+/// workspace right after the workspace it came from (several from one origin: the newest is
+/// nearest to it, like the compositor), hidden (scratchpad) workspaces last. A fullscreen
+/// workspace whose origin is not there ends the visible ones.
+fn screen_order(mut v: Vec<&Workspace>) -> Vec<&Workspace> {
+    let (mut pending, mut out): (Vec<&Workspace>, Vec<&Workspace>) =
+        v.drain(..).partition(|w| is_fullscreen_workspace(w) && !w.is_hidden);
+    out.sort_by_key(|w| (w.is_hidden, w.idx, w.id));
+    // oldest first, each inserted right after its origin: the newest ends up nearest to it
+    pending.sort_by_key(|w| w.id);
+    while !pending.is_empty() {
+        let before = pending.len();
+        let mut rest = Vec::new();
+        for w in pending {
+            match w.fullscreen_origin_id.and_then(|o| out.iter().position(|x| x.id == o)) {
+                Some(at) => out.insert(at + 1, w),
+                None => rest.push(w),
+            }
+        }
+        pending = rest;
+        if pending.len() == before {
+            let at = out.iter().position(|w| w.is_hidden).unwrap_or(out.len());
+            for (i, w) in pending.into_iter().enumerate() {
+                out.insert(at + i, w);
+            }
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use niri_ipc::{CastKind, CastTarget, Timestamp, Window, WindowLayout, Workspace};
@@ -295,6 +365,8 @@ pub(crate) mod tests {
             active_window_id: None,
             mode: Default::default(),
             is_hidden: false,
+            fullscreen_window_id: None,
+            fullscreen_origin_id: None,
         }
     }
 
@@ -772,6 +844,75 @@ pub(crate) mod tests {
         let win = r#"{"WindowOpenedOrChanged":{"window":{"id":7,"title":"foot","app_id":"foot","pid":4242,"workspace_id":3,"is_focused":true,"is_floating":true,"is_urgent":false,"layout":{"pos_in_scrolling_layout":null,"tile_size":[802.0,602.0],"window_size":[800,600],"tile_pos_in_workspace_view":[611.0,224.0],"window_offset_in_tile":[1.0,1.0],"pos_in_canvas":[559.0,239.0],"is_pinned":false},"focus_timestamp":null,"hidden_from_workspace_id":null}}}"#;
         s.apply(serde_json::from_str(win).unwrap());
         assert_eq!(s.canvas_windows(3).first().map(|w| w.rect), Some(PlaneRect::new(559.0, 239.0, 802.0, 602.0)));
+    }
+
+    /// DP-1: desks 1 (id 1), 2 (id 2), 5 (id 5, an empty one made by index) and fullscreen
+    /// workspaces: 10 and 11 from desk 2 (11 is the newer), 12 from desk 5 (its window just left).
+    fn with_fullscreen() -> NiriState {
+        let mut s = NiriState::default();
+        let fs = |id: u64, origin: u64, win: Option<u64>| {
+            let mut w = ws(id, 0, "DP-1", false, false);
+            w.fullscreen_origin_id = Some(origin);
+            w.fullscreen_window_id = win;
+            w
+        };
+        s.apply(Event::WorkspacesChanged {
+            workspaces: vec![
+                fs(11, 2, Some(21)),
+                ws(5, 4, "DP-1", false, false),
+                fs(12, 5, None),
+                ws(2, 2, "DP-1", true, true),
+                fs(10, 2, Some(20)),
+                ws(1, 1, "DP-1", false, false),
+                ws(3, 3, "DP-1", false, false),
+                ws(7, 1, "HDMI-A-1", true, false),
+            ],
+        });
+        s
+    }
+
+    #[test]
+    fn fullscreen_workspaces_follow_their_origin_and_have_no_number() {
+        let s = with_fullscreen();
+        // on-screen order: the newest fullscreen workspace is nearest to its origin; desks keep idx order
+        assert_eq!(s.workspaces_on("DP-1").iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 2, 11, 10, 3, 5, 12]);
+        assert_eq!(s.workspaces_sorted().iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 2, 11, 10, 3, 5, 12, 7]);
+        // numbers skip them, so the other desks keep theirs
+        assert_eq!(
+            [1, 2, 3, 5, 10, 11, 12].map(|id| s.visible_number(id)),
+            [Some(1), Some(2), Some(3), Some(4), None, None, None]
+        );
+        // a fullscreen workspace borrows its origin's number
+        assert_eq!([10, 11, 12, 2, 99].map(|id| s.desk_number(id)), [Some(2), Some(2), Some(4), Some(2), None]);
+        assert_eq!(s.desk(10).map(|w| w.id), Some(2));
+        assert!(is_fullscreen_workspace(&s.workspaces[&10]) && !is_fullscreen_workspace(&s.workspaces[&2]));
+    }
+
+    #[test]
+    fn a_fullscreen_workspace_knows_its_window_unless_it_just_left() {
+        let mut s = with_fullscreen();
+        s.apply(Event::WindowOpenedOrChanged { window: win(20, 10, None, 800.0, false) });
+        assert_eq!(s.fullscreen_window(10).map(|w| w.id), Some(20));
+        assert!(s.fullscreen_window(11).is_none(), "window 21 is not known (yet)");
+        assert!(s.fullscreen_window(12).is_none(), "fullscreen_window_id is None while the window leaves");
+        assert!(s.fullscreen_window(2).is_none(), "an ordinary workspace has none");
+    }
+
+    #[test]
+    fn a_fullscreen_workspace_without_its_origin_ends_the_visible_list_before_the_hidden_ones() {
+        let mut s = with_fullscreen();
+        let mut scratch = ws(9, 0, "DP-1", false, false);
+        scratch.is_hidden = true;
+        let mut all: Vec<_> = s.workspaces.values().cloned().collect();
+        all.retain(|w| w.id != 2);
+        all.push(scratch);
+        s.apply(Event::WorkspacesChanged { workspaces: all });
+        let order: Vec<u64> = s.workspaces_on_including_hidden("DP-1").iter().map(|w| w.id).collect();
+        assert_eq!(&order[..3], &[1, 3, 5][..]);
+        assert_eq!(order.last(), Some(&9), "hidden last");
+        assert!(order.contains(&10) && order.contains(&11) && order.contains(&12));
+        assert_eq!(s.desk(10).map(|w| w.id), None);
+        assert_eq!(s.workspaces_on("DP-1").len(), 6);
     }
 
     #[test]

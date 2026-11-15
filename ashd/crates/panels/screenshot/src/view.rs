@@ -192,10 +192,7 @@ impl ScreenshotPanel {
             .rounded(t.radius_control)
             .px(px(4.))
             .py(px(3.))
-            .hover({
-                let s2 = t.surface_2;
-                move |s| s.bg(s2)
-            })
+            .child(ashd_ui::hover_wash(t.surface_2, None, t.radius_control))
             .on_click(cx.listener(|this, _, _, cx| this.cycle_delay(cx)))
             .child(label(prefs.delay.label(), cx));
 

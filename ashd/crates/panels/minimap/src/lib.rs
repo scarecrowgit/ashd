@@ -17,7 +17,15 @@
 //! Every interactive part is inside `hit_area` (the card); the rest of the output stays
 //! click-through. Re-renders only for its own workspace's view/windows.
 //!
+//! Idle hide ([`visibility`]): the card is shown while the view changes (pan, zoom, a window
+//! moved, resized, opened or closed, a switch to the workspace) and for 1.5 s afterwards,
+//! then fades out over 250 ms; a new change fades it back in over 120 ms. It stays while the
+//! pointer is over it or a drag runs. Once (nearly) transparent it leaves the input region,
+//! and once hidden nothing renders until the next change.
+//!
 //! Owner: canvas UI.
+
+pub mod visibility;
 
 use std::{
     cell::Cell,
@@ -29,17 +37,18 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, Global, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollDelta, ScrollEvent,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, prelude::*, px,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollDelta,
+    ScrollEvent, StatefulInteractiveElement as _, Styled as _, Task, Window, canvas, div, prelude::*, px,
 };
 use ashd_niri::{
     CanvasWindow, LiveViews, PlaneRect,
     canvas::{offset_centering, visible_plane_rect},
     niri_ipc::{Action, CanvasRegion, CanvasViewState},
 };
-use ashd_panel_canvas_hud::common::{self, Hover};
+use ashd_panel_canvas_hud::common::{self, Hover, ModeFade, SWAP_TRAVEL};
 use ashd_shell_core::{Panel, PanelContext, PanelId, Placement, hit_area};
-use ashd_ui::{Icon, alpha, theme};
+use ashd_ui::{Icon, alpha, hover_wash, swap, theme};
+use visibility::{Timings, Visibility};
 
 /// Card offset from the main area's bottom-right corner and width (desk-05).
 pub const CARD_RIGHT: f32 = 14.0;
@@ -227,6 +236,17 @@ pub struct MinimapPanel {
     map_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     wheel_acc: f32,
     last_wheel: Option<Instant>,
+    /// Idle-hide state machine (see [`visibility`]).
+    vis: Visibility,
+    /// The pointer is over the card (any part of it, not just a control).
+    card_hovered: bool,
+    /// The scratchpad visibility the card was last laid out for.
+    scratch_seen: bool,
+    /// The one pending wake-up for the end of the hold: when, and the timer.
+    wake: Option<(Instant, Task<()>)>,
+    /// The card comes and goes with the mode (Scroll <-> Canvas, 280 ms out-cubic); the last
+    /// model and view are kept while it leaves.
+    fade: ModeFade<(MiniModel, Option<CanvasViewState>)>,
 }
 
 fn hover_of(this: &mut MinimapPanel) -> &mut Hover {
@@ -253,6 +273,12 @@ impl MinimapPanel {
         self.views.read(cx).canvas(ws).cloned().or_else(|| self.ctx.niri.read(cx).canvas_view(ws).cloned())
     }
 
+    /// Tell the mode fade what is shown now.
+    fn sync_fade(&mut self) {
+        let cur = self.model.clone().map(|m| (m, self.view.clone()));
+        self.fade.sync(cur.as_ref());
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let next = self.compute(cx);
         let flips = next.is_some() != self.model.is_some();
@@ -260,10 +286,17 @@ impl MinimapPanel {
         self.model = next;
         if self.model.is_none() {
             self.drag = None;
+            self.card_hovered = false;
+            self.vis.set_held(false, Instant::now());
+            self.vis.set_hovered(false, Instant::now());
         }
         let view = self.compute_view(cx);
         if changed || view != self.view {
             self.view = view;
+            if self.model.is_some() {
+                self.vis.poke(Instant::now());
+            }
+            self.sync_fade();
             cx.notify();
         }
         if flips {
@@ -275,7 +308,40 @@ impl MinimapPanel {
         let view = self.compute_view(cx);
         if view != self.view {
             self.view = view;
+            if self.model.is_some() {
+                self.vis.poke(Instant::now());
+            }
+            self.sync_fade();
             cx.notify();
+        }
+    }
+
+    /// The pointer entered / left the card: it stays shown while hovered.
+    fn set_card_hovered(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.card_hovered != on {
+            self.card_hovered = on;
+            self.vis.set_hovered(on, Instant::now());
+            cx.notify();
+        }
+    }
+
+    /// Keep exactly one timer for the end of the hold (`None`: nothing to wake for).
+    fn arm_wake(&mut self, at: Option<Instant>, cx: &mut Context<Self>) {
+        match (at, self.wake.as_ref().map(|w| w.0)) {
+            (None, _) => self.wake = None,
+            (Some(a), Some(b)) if a == b => {}
+            (Some(a), _) => {
+                let delay = a.saturating_duration_since(Instant::now());
+                let task = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    // Clear first: a wake-up that comes early re-arms from the next render.
+                    let _ = this.update(cx, |this, cx| {
+                        this.wake = None;
+                        cx.notify();
+                    });
+                });
+                self.wake = Some((a, task));
+            }
         }
     }
 
@@ -304,6 +370,7 @@ impl MinimapPanel {
             }
             MapHit::Viewport => {
                 if let Some(v) = &self.view {
+                    self.vis.set_held(true, Instant::now());
                     self.drag = Some(Drag {
                         start_mouse: ev.position,
                         start_offset: v.target_offset,
@@ -350,6 +417,7 @@ impl MinimapPanel {
             self.flush_drag(cx);
         }
         self.drag = None;
+        self.vis.set_held(false, Instant::now());
         cx.notify();
     }
 
@@ -389,10 +457,13 @@ impl Panel for MinimapPanel {
         cx.observe(&views, |this, _, cx| this.refresh_view(cx)).detach();
         cx.observe(&collapsed, |_, _, cx| cx.notify()).detach();
         if let Some(shell) = ctx.shell.entity() {
-            // Scratchpad shown/hidden moves the card.
-            cx.observe(&shell, |this, _, cx| {
+            // Scratchpad shown/hidden moves the card; any other shell change is not ours.
+            cx.observe(&shell, |this, shell, cx| {
                 this.refresh(cx);
-                cx.notify();
+                let shown = shell.read(cx).scratch_visible;
+                if std::mem::replace(&mut this.scratch_seen, shown) != shown {
+                    cx.notify();
+                }
             })
             .detach();
         }
@@ -407,30 +478,98 @@ impl Panel for MinimapPanel {
             map_bounds: Rc::default(),
             wheel_acc: 0.0,
             last_wheel: None,
+            vis: Visibility::new(Timings::current(), Instant::now()),
+            card_hovered: false,
+            scratch_seen: false,
+            wake: None,
+            fade: ModeFade::new(None),
         };
+        this.scratch_seen = this.ctx.shell.entity().is_some_and(|s| s.read(cx).scratch_visible);
         this.model = this.compute(cx);
         this.view = this.compute_view(cx);
+        if this.model.is_some() {
+            this.vis.poke(Instant::now());
+        }
+        this.fade = ModeFade::new(this.model.clone().map(|m| (m, this.view.clone())));
         this
     }
 
     fn is_live(&self, _cx: &App) -> bool {
-        self.model.is_some()
+        self.fade.is_live()
     }
 }
 
+/// The card's input region: while it is (nearly) transparent it is left out, so the
+/// invisible minimap never eats a click.
+fn input_area(el: impl IntoElement, interactive: bool) -> gpui::Div {
+    if interactive { hit_area(el) } else { div().relative().child(el) }
+}
+
+/// Clears the card hover when the pointer leaves the surface (no `on_hover(false)` reaches
+/// the card then, GPUI-NOTES G8).
+fn card_exit_reset(cx: &mut Context<MinimapPanel>) -> impl IntoElement {
+    let this = cx.entity().downgrade();
+    canvas(
+        |_, _, _| {},
+        move |_, _, window: &mut Window, _| {
+            let this = this.clone();
+            window.on_mouse_event(move |_: &MouseExitEvent, _, _, cx| {
+                let _ = this.update(cx, |t, cx| t.set_card_hovered(false, cx));
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 impl Render for MinimapPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().size_full().relative();
-        let Some(m) = self.model.clone() else { return root };
+        let shown = self.fade.view();
+        if self.fade.animating() {
+            window.request_animation_frame();
+        }
+        if self.fade.take_gone() {
+            // the exit is over: the overlay host may drop the surface
+            self.ctx.shell.refresh_overlays(cx);
+        }
+        let Some(common::Shown { content: (m, shown_view), fade, travel, leaving }) = shown else {
+            self.wake = None;
+            return root;
+        };
         let t = theme(cx).clone();
         let Some(d) = common::display_ctx(&self.ctx, &t, cx) else { return root };
-        let view = self.view.clone();
+
+        // Idle hide: frames only while the opacity moves, one timer while it holds, and
+        // nothing at all once it is hidden.
+        self.vis.set_timings(Timings::current());
+        let frame = self.vis.frame(Instant::now());
+        if frame.animating {
+            window.request_animation_frame();
+        }
+        self.arm_wake(frame.wake_at, cx);
+        if !frame.drawn() {
+            return root;
+        }
+        let interactive = frame.interactive() && !leaving;
+        let view = shown_view;
         let collapsed = *self.collapsed.read(cx);
         let zoom_pct = view.as_ref().map(|v| format!("{}%", (v.zoom * 100.0).round() as i64)).unwrap_or_else(|| "—".into());
         let right = d.area.origin.x + d.area.size.width - px(CARD_RIGHT);
         let bottom = d.area.origin.y + d.area.size.height - px(CARD_BOTTOM);
         let place = |el: gpui::Div| {
-            div().absolute().left(right - px(CARD_W)).top(px(0.)).w(px(CARD_W)).h(bottom).flex().flex_col().justify_end().child(el)
+            div()
+                .absolute()
+                .left(right - px(CARD_W))
+                .top(px(SWAP_TRAVEL * (1.0 - travel)))
+                .w(px(CARD_W))
+                .h(bottom)
+                .flex()
+                .flex_col()
+                .justify_end()
+                .opacity(frame.opacity * fade)
+                // chip <-> card: the card dips and comes back when it is (un)collapsed
+                .child(swap("minimap-body", collapsed, move |p| div().opacity(p).child(el)))
         };
 
         if collapsed {
@@ -443,7 +582,7 @@ impl Render for MinimapPanel {
                     .px(px(10.))
                     .py(px(6.))
                     .cursor_pointer()
-                    .when(self.hover.is("expand"), |d| d.bg(t.surface_2))
+                    .child(hover_wash(t.surface_2, None, t.radius_control))
                     .child(common::label("minimap", t.fg, &t))
                     .child(common::label(&zoom_pct, t.fg_muted, &t)),
                 "expand",
@@ -451,7 +590,12 @@ impl Render for MinimapPanel {
                 cx,
             )
             .on_click(cx.listener(|this, _, _, cx| set_collapsed(&this.collapsed, false, cx)));
-            let chip = div().flex().justify_end().child(hit_area(chip)).child(common::hover_reset(hover_of, cx));
+            let chip = div()
+                .flex()
+                .justify_end()
+                .child(input_area(chip, interactive).id("minimap-chip-area").on_hover(cx.listener(|this, inside: &bool, _, cx| this.set_card_hovered(*inside, cx))))
+                .child(common::hover_reset(hover_of, cx))
+                .child(card_exit_reset(cx));
             return root.child(place(chip));
         }
 
@@ -613,7 +757,7 @@ impl Render for MinimapPanel {
                 .justify_center()
                 .rounded(ashd_shell_core::frame::nested_radius(&t))
                 .cursor_pointer()
-                .when(self.hover.is("pct"), |d| d.bg(t.surface_2))
+                .child(hover_wash(t.surface_2, None, ashd_shell_core::frame::nested_radius(&t)))
                 .font_family(t.font_mono.clone())
                 .text_size(px(PCT_SIZE))
                 .text_color(t.fg)
@@ -657,8 +801,12 @@ impl Render for MinimapPanel {
             .child(header)
             .child(map)
             .child(footer)
-            .child(common::hover_reset(hover_of, cx));
-        root.child(place(div().child(hit_area(card))))
+            .child(common::hover_reset(hover_of, cx))
+            .child(card_exit_reset(cx));
+        let card = input_area(card, interactive)
+            .id("minimap-card-area")
+            .on_hover(cx.listener(|this, inside: &bool, _, cx| this.set_card_hovered(*inside, cx)));
+        root.child(place(div().child(card)))
     }
 }
 

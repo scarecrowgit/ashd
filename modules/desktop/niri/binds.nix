@@ -1,13 +1,16 @@
 # The keybind table as data. One list drives three outputs:
-#   kdl        -> the `binds { }` block of /etc/niri/config.kdl
+#   kdl        -> the `binds { }` block and the `recent-windows { binds { } }` block of
+#                 /etc/niri/config.kdl
 #   json       -> /etc/ashd/keybinds.json (the shell's cheatsheet)
-#   duplicates -> asserted empty in niri.nix (no key combination is bound twice)
+#   duplicates -> asserted empty in niri.nix (no key combination is bound twice, across
+#                 both blocks)
 # docs/KEYBINDS.md is written by hand from the same table.
 #
 # Mod is Super on a TTY session (Alt when niri runs nested).
-# niri's built-in recent-windows binds (Alt/Super + Tab and grave, Shift reverses) are
-# intentionally not repeated here, and pointer drags are built into niri and the fork
-# (Mod+LMB move, Mod+RMB resize, Mod+MMB / Mod+LMB on the empty plane pan the canvas).
+# niri's recent-windows switcher binds both Alt and Super + Tab / grave by default; the
+# `mru` entries below replace those defaults with the Super ones only, so Alt+Tab reaches
+# the applications. Pointer drags are built into niri and the fork (Mod+LMB move, Mod+RMB
+# resize, Mod+MMB / Mod+LMB on the empty plane pan the canvas).
 #
 # Group order below is the order of the cheatsheet sections. The cheatsheet shows
 # groups whose name contains "canvas" only while the focused workspace is a canvas.
@@ -33,10 +36,14 @@ let
   bl = group: keys: title: action: (b group keys title action) // { allowWhenLocked = true; };
   # Same, with a repeat cooldown (wheel binds fire once per notch otherwise).
   bc = ms: group: keys: title: action: (b group keys title action) // { cooldownMs = ms; };
+  # A recent-windows switcher bind (`next-window` / `previous-window`), rendered into
+  # `recent-windows { binds { } }`; the switcher stays open while a modifier is held.
+  bm = group: keys: title: action: (b group keys title action) // { mru = true; };
 
   workspaceNums = lib.genList (i: i + 1) 9;
   # `focus-workspace N` counts only visible workspaces in the fork, so the hidden
-  # scratchpad workspace (workspaces.nix) does not shift the numbers.
+  # scratchpad workspace (workspaces.nix) does not shift the numbers. With the fork's
+  # `create-workspaces-by-index` (layout.nix) N is created if it does not exist yet.
 
   entries = lib.filter (e: e.action != null) (
     [
@@ -58,6 +65,15 @@ let
       (b "Windows" "Mod+Shift+Down" "Move window down" "move-window-down")
       (b "Windows" "Mod+Ctrl+F" "Fullscreen" "fullscreen-window")
       (b "Windows" "Mod+Escape" "Overview" "toggle-overview")
+      # Recent windows: a quick tap switches to the previous window, holding Super walks
+      # the list (the switcher shows after 150 ms). `scope="all"` on purpose: without it
+      # niri reopens the switcher in the scope last picked inside it (W workspace, O output,
+      # S cycle; easy to hit with Super still held, e.g. Super+W), and on a workspace with
+      # one window a quick Super+Tab then does nothing.
+      (bm "Windows" "Mod+Tab" "Recent windows" ''next-window scope="all"'')
+      (bm "Windows" "Mod+Shift+Tab" "Recent windows (back)" ''previous-window scope="all"'')
+      (bm "Windows" "Mod+grave" "Recent windows of this app" ''next-window scope="all" filter="app-id"'')
+      (bm "Windows" "Mod+Shift+grave" "Recent windows of this app (back)" ''previous-window scope="all" filter="app-id"'')
 
       # ---- columns (strip mode; on a canvas they act on the floating window or do nothing) ----
       (b "Columns" "Mod+Left" "Focus column left" "focus-column-left")
@@ -85,6 +101,7 @@ let
     ++ map (n: b "Workspaces" "Mod+Ctrl+${toString n}" "Move column to workspace ${toString n}" "move-column-to-workspace ${toString n}") workspaceNums
     ++ [
       # ---- canvas (the fork's infinite canvas; most keys do something sensible in the strip too) ----
+      (b "Canvas" "Mod+G" "Toggle strip / canvas" "toggle-workspace-mode")
       (b "Canvas" "Mod+Ctrl+C" "Toggle strip / canvas" "toggle-workspace-mode")
       (b "Canvas" "Mod+Alt+Left" "Pan left" (ifCanvas "canvas-pan-left" null))
       (b "Canvas" "Mod+Alt+Right" "Pan right" (ifCanvas "canvas-pan-right" null))
@@ -96,7 +113,10 @@ let
       (b "Canvas" "Mod+Ctrl+0" "Zoom 100%" "canvas-set-zoom 1.0")
       (b "Canvas" "Mod+Home" "Pan to origin" "canvas-home")
       (b "Canvas" "Mod+P" "Pin window to the screen" "toggle-window-pinned")
-      # Mod+wheel: zoom at the pointer on canvases, switch workspace in the strip.
+      # Mod+wheel: switch workspace in the strip. Over a canvas the fork zooms natively and
+      # continuously at the pointer (`wheel-zoom-factor`, no cooldown) before these binds are
+      # looked at; the canvas branch only fires where that does not apply (e.g. pointer over the
+      # bar) and stays here so the shell's HUD/cheatsheet find the zoom keys.
       (bc 150 "Canvas" "Mod+WheelScrollUp" "Zoom in at pointer (strip: workspace up)"
         (ifCanvas "canvas-zoom-in at-cursor=true" "focus-workspace-up"))
       (bc 150 "Canvas" "Mod+WheelScrollDown" "Zoom out at pointer (strip: workspace down)"
@@ -154,6 +174,9 @@ let
     + lib.optionalString (e.allowWhenLocked or false) " allow-when-locked=true"
     + " { ${e.action}; }";
 
+  isMru = e: e.mru or false;
+  renderBlock = indent: es: lib.concatMapStringsSep "\n" (e: indent + renderBind e) es;
+
   display = keys: lib.replaceStrings [ "Mod+" ] [ "Super+" ] keys;
 
   # niri ignores modifier order and key-name case: compare on a canonical spelling.
@@ -168,7 +191,14 @@ in
 
   kdl = ''
     binds {
-    ${lib.concatMapStringsSep "\n" (e: "    " + renderBind e) entries}
+    ${renderBlock "    " (lib.filter (e: !isMru e) entries)}
+    }
+
+    // The switcher binds replace niri's defaults (which also take Alt+Tab).
+    recent-windows {
+        binds {
+    ${renderBlock "        " (lib.filter isMru entries)}
+        }
     }
   '';
 

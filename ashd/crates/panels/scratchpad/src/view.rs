@@ -15,8 +15,8 @@ use gpui::{
 use ashd_svc_clipboard::{Entry, Kind};
 use ashd_tokens::{ScratchpadVariant, metrics, motion};
 use ashd_ui::{
-    ButtonKind, Icon, Theme, TooltipExt as _, alpha, anim, app_icon, button_small, color, hline, icon, label, rich_row,
-    rich_row_text, theme, title,
+    ButtonKind, Icon, Theme, TooltipExt as _, alpha, anim, app_icon, button_small, color, follow, hline, hover_ring,
+    hover_wash, icon, label, mix, presence::Timing, rich_row, rich_row_text, theme, title,
 };
 
 use crate::{
@@ -211,7 +211,7 @@ fn ghost_icon(id: impl Into<gpui::ElementId>, ic: Icon, tint: gpui::Hsla, cx: &A
         .justify_center()
         .rounded(t.radius_control)
         .cursor_pointer()
-        .hover(move |s| s.bg(hover))
+        .child(hover_wash(hover, Some(t.line), t.radius_control))
         .child(icon(ic, 13.).text_color(tint))
 }
 
@@ -304,6 +304,7 @@ impl ScratchpadPanel {
             .children(Tab::ALL.map(|tab| {
                 let active = self.tab == tab;
                 let (fg, hover_fg, s2) = (if active { t.on_accent } else { t.fg_muted }, t.fg, t.surface_2);
+                let (accent, radius) = (t.accent, t.radius_control);
                 div()
                     .id(("scratchpad-tab", tab.index() as u32))
                     .flex_1()
@@ -317,8 +318,27 @@ impl ScratchpadPanel {
                     .text_size(px(metrics::type_scale::UI.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg)
-                    .when(active, |d| d.bg(t.accent))
-                    .when(!active, move |d| d.hover(move |s| s.bg(s2).text_color(hover_fg)))
+                    .child(
+                        // The active tab's accent fill cross-fades between tabs.
+                        follow(
+                            ("scratchpad-tab-fill", tab.index() as u32),
+                            if active { 1.0 } else { 0.0 },
+                            Timing::new(motion::timing::SWAP, anim::EASE_STANDARD),
+                            move |p| {
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full()
+                                    .rounded((radius - gpui::px(1.)).max(gpui::px(0.)))
+                                    .bg(mix(gpui::transparent_black(), accent, p))
+                            },
+                        )
+                        .fade(),
+                    )
+                    .when(!active, move |d| {
+                        d.hover(move |s| s.text_color(hover_fg)).child(hover_wash(s2, None, (radius - gpui::px(1.)).max(gpui::px(0.))))
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
                     .child(tab.label())
                     .child(
@@ -447,7 +467,7 @@ impl ScratchpadPanel {
             .border_color(if selected { t.accent } else { t.line })
             .rounded(t.radius_control)
             .cursor_pointer()
-            .hover(move |s| s.border_color(if selected { accent } else { alpha(accent, 0.55) }))
+            .when(!selected, |d| d.child(hover_ring(alpha(accent, 0.55), px(1.), t.radius_control)))
             .active(move |s| s.border_color(line))
             .ashd_tooltip(format!("{} — click to bring it back", w.title), None)
             .on_click(cx.listener(move |this, _, _, cx| this.activate(ItemKey::Window(id), cx)))
@@ -546,7 +566,7 @@ impl ScratchpadPanel {
                     .rounded(t.radius_control)
                     .overflow_hidden()
                     .bg(t.bg)
-                    .hover(move |s| s.border_color(if selected { accent } else { alpha(accent, 0.55) }))
+                    .when(!selected, |d| d.child(hover_ring(alpha(accent, 0.55), px(1.), t.radius_control)))
                     .child(
                         img(item.thumb.clone())
                             .size_full()

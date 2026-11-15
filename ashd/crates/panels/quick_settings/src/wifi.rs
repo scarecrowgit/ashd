@@ -7,7 +7,7 @@ use gpui::{
     ClickEvent, Context, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, Window, div, prelude::*, px,
 };
 use ashd_svc_network::{AccessPoint, WifiState};
-use ashd_ui::{Icon, TextInput, TextInputEvent, icon, label, theme};
+use ashd_ui::{Icon, TextInput, TextInputEvent, hover_wash, icon, label, theme};
 
 use crate::{
     QuickSettingsPanel,
@@ -139,7 +139,7 @@ impl QuickSettingsPanel {
                         .gap(px(10.))
                         .cursor_pointer()
                         .when(picked, |d| d.bg(t.surface_2))
-                        .when(!picked, |d| d.hover(move |s| s.bg(s2)))
+                        .when(!picked, |d| d.child(hover_wash(s2, None, t.radius_control)))
                         .child(bars)
                         .child(
                             div()

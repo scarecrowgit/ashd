@@ -11,6 +11,8 @@
 //! ```
 
 pub mod anim;
+pub mod fx;
+pub mod presence;
 mod assets;
 pub mod controls;
 pub mod icons;
@@ -21,6 +23,7 @@ pub mod ui;
 
 pub use assets::Assets;
 pub use controls::*;
+pub use fx::{Flip, Follow, HoverWash, Look, Reveal, Swap, fill_bar, flip, follow, hover_ring, hover_wash, mix, reveal, select_plate, state_layer, swap};
 pub use icons::{Icon, app_icon, icon, spinner};
 pub use overlays::*;
 pub use text_input::{TextInput, TextInputEvent};

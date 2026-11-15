@@ -149,11 +149,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794663183,
-        "narHash": "sha256-yM0z1xCGI9IxtGjqAtflKJezt1XvL5zAxDj4Zkq/d20=",
+        "lastModified": 1794693435,
+        "narHash": "sha256-0MEWMweyQsjgzBLvsBCv2PbrbVzG2LV0b0lTaEjl/xo=",
         "owner": "scarecrowgit",
         "repo": "niri",
-        "rev": "836100bdc8bb53142a6dc3ac0336cb9451c0fd72",
+        "rev": "7b307863835a84141218dd02dc54420ca48e837d",
         "type": "github"
       },
       "original": {

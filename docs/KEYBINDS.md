@@ -10,17 +10,33 @@ the Nix data changes. A Nix assertion fails the build if a key combination is bo
 
 `Super` is niri's `Mod` (it is `Alt` when niri runs nested inside another compositor).
 Entries marked **shell** are only bound when `ashd.shell.enable = true`; where a fallback
-exists it is bound otherwise. niri's own recent-windows switcher (`Alt+Tab`, `Super+Tab`,
-with `Shift` reversed and `grave` for the same app) is built in and not listed.
+exists it is bound otherwise. The recent-windows switcher keys (Super+Tab, Super+grave)
+are niri's switcher, generated into `recent-windows { binds { } }`; they replace niri's
+defaults, which also took Alt+Tab, so Alt+Tab reaches the applications. While the
+switcher is open (Super held), W, O and S narrow it to the workspace / output or cycle the
+scope; every Super+Tab starts again with all windows (`scope="all"`; niri would otherwise
+keep the last scope, and a quick Super+Tab on a workspace with one window did nothing).
 
 Rows with `if-canvas { A; B; }` do `A` when the focused workspace is a canvas and `B` when
-it is a strip (`B` missing: nothing). Super+Ctrl+C switches the focused workspace between
-the two; the theme decides the mode of new workspaces (Ink and Moss start as canvas).
+it is a strip (`B` missing: nothing). Super+G (or Super+Ctrl+C) switches the focused
+workspace between the two; the theme decides the mode of new workspaces (Ink and Moss start as canvas).
 The cheatsheet shows the **Canvas** group only while the focused workspace is a canvas.
 
 The hidden scratchpad workspace (`ashd.scratchpad`, default name `scratch`) does not count
 in workspace numbers: the fork's `focus-workspace N` and `move-column-to-workspace N` count
 visible workspaces only, so Super+1..9 are plain `focus-workspace 1..9` on every monitor.
+Workspaces are created by number (the fork's `create-workspaces-by-index`, set in
+`modules/desktop/niri/layout.nix`): Super+5 with two workspaces creates workspaces 3, 4
+and 5 and goes to 5, and Super+Ctrl+5 moves the column there. An empty workspace stays as
+long as a higher-numbered one has windows or is focused, so the numbers never shift; only
+the empty workspaces after the last used one are removed.
+
+Fullscreen (the fork's `fullscreen-workspaces` and `edge-reveal`, `modules/desktop/niri/layout.nix`):
+a fullscreen window lives on its own workspace right after the one it came from; it has no
+number (Super+1..9 skip it) and Super+Ctrl+Up/Down reach it. New windows opened from it open
+on that origin workspace. Over a fullscreen window, rest the pointer against the left edge
+(rail) or the bottom edge (bar and dock) to slide them in; they slide out when the pointer
+leaves them. Not while a game holds the pointer, a button is held or a menu grab is open.
 
 Pointer (built in, not in the table): Super+left-drag moves a window, Super+right-drag
 resizes it, Super+middle-drag pans a canvas, Super+left-drag on the empty plane pans it,
@@ -48,8 +64,12 @@ and a pinch zooms it.
 | Super+Down | `focus-window-down` | |
 | Super+Shift+Up | `move-window-up` | |
 | Super+Shift+Down | `move-window-down` | |
-| Super+Ctrl+F | `fullscreen-window` | |
+| Super+Ctrl+F | `fullscreen-window` | the window gets a workspace of its own after the current one (no number); again: back to its place |
 | Super+Escape | `toggle-overview` | |
+| Super+Tab | `next-window scope="all"` (recent windows) | tap: previous window; hold Super and tap Tab: walk the list |
+| Super+Shift+Tab | `previous-window scope="all"` (recent windows) | |
+| Super+grave | `next-window scope="all" filter="app-id"` (recent windows) | windows of the focused app |
+| Super+Shift+grave | `previous-window scope="all" filter="app-id"` (recent windows) | |
 
 ## Columns
 
@@ -75,26 +95,27 @@ and a pinch zooms it.
 | Super+Ctrl+Down | `focus-workspace-down` | |
 | Super+Ctrl+Shift+Up | `move-column-to-workspace-up` | |
 | Super+Ctrl+Shift+Down | `move-column-to-workspace-down` | |
-| Super+1 ... Super+9 | `focus-workspace N` | N counts visible workspaces only (the hidden scratchpad is skipped) |
-| Super+Ctrl+1 ... Super+Ctrl+9 | `move-column-to-workspace N` | same numbering |
+| Super+1 ... Super+9 | `focus-workspace N` | N counts visible workspaces only (the hidden scratchpad is skipped); creates workspace N if needed |
+| Super+Ctrl+1 ... Super+Ctrl+9 | `move-column-to-workspace N` | same numbering; creates workspace N if needed |
 
 ## Canvas
 
 | Keys | Action | Notes |
 | --- | --- | --- |
-| Super+Ctrl+C | `toggle-workspace-mode` | |
+| Super+G | `toggle-workspace-mode` | strip / canvas |
+| Super+Ctrl+C | `toggle-workspace-mode` | same |
 | Super+Alt+Left | `if-canvas { canvas-pan-left; }` | |
 | Super+Alt+Right | `if-canvas { canvas-pan-right; }` | |
 | Super+Alt+Up | `if-canvas { canvas-pan-up; }` | |
 | Super+Alt+Down | `if-canvas { canvas-pan-down; }` | pans by `pan-step` (120 px); does nothing in the strip |
-| Super+Equal | `if-canvas { canvas-zoom-in; set-column-width "+10%"; }` | |
+| Super+Equal | `if-canvas { canvas-zoom-in; set-column-width "+10%"; }` | zoom steps 0.4 0.55 0.75 1.0; holding the key keeps zooming |
 | Super+Minus | `if-canvas { canvas-zoom-out; set-column-width "-10%"; }` | |
 | Super+0 | `if-canvas { canvas-fit; center-column; }` | |
 | Super+Ctrl+0 | `canvas-set-zoom 1.0` | |
 | Super+Home | `canvas-home` | |
 | Super+P | `toggle-window-pinned` | |
-| Super+WheelScrollUp | `if-canvas { canvas-zoom-in at-cursor=true; focus-workspace-up; }` | 150 ms cooldown |
-| Super+WheelScrollDown | `if-canvas { canvas-zoom-out at-cursor=true; focus-workspace-down; }` | 150 ms cooldown |
+| Super+WheelScrollUp | `if-canvas { canvas-zoom-in at-cursor=true; focus-workspace-up; }` | over a canvas: continuous zoom at the pointer, x1.2 per notch, no cooldown (built in); strip: 150 ms cooldown |
+| Super+WheelScrollDown | `if-canvas { canvas-zoom-out at-cursor=true; focus-workspace-down; }` | same; Super+two-finger scroll on a touchpad zooms too |
 
 ## Scratchpad
 

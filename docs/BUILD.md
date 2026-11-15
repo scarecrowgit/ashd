@@ -101,8 +101,16 @@ cargo xtask nested stop "$root"
 
 cargo xtask shot-check --theme all --niri-config $SCRATCH   # frame geometry and token colours, 5 themes
 cargo xtask smoke --niri-config $SCRATCH                    # every CLI request against a live shell
-cargo xtask ci --niri-config $SCRATCH                       # check, clippy, tests, shot-check, smoke
+cargo xtask motion --niri-config $SCRATCH                   # every transition has in-between frames and an exact end state
+cargo xtask fullscreen                                      # fullscreen workspace, rail entry, edge reveal of rail and bar
+cargo xtask ci --niri-config $SCRATCH                       # check, clippy, tests, shot-check, smoke, fullscreen
 ```
+
+`motion` and `fullscreen` drive a pointer and take bursts of screenshots; set `GRIM` and
+`WLRCTL` to store paths of `grim` and `wlrctl` or every shot spends seconds in `nix-build`.
+`ASHD_MOTION_SCALE=N` slows every shell animation N times, `ASHD_FRAME_LOG=1` logs frames
+per second per surface (an idle shell must log 0 for everything but the bar's 1 Hz data),
+`ASHD_BAR_FIXTURE=worst` forces the widest status values.
 
 Inside the nested session power actions, theme reloads and audio are faked
 (`ASHD_FAKE_POWER=1`, `ASHD_NO_RELOAD=1`, a dead `PULSE_SERVER`), and D-Bus is a private
@@ -155,6 +163,15 @@ Things only real hardware can show:
   stays on the third-party agent until that works.
 - Night light, DDC brightness (`ashd.brightness.ddc.enable`), Bluetooth pairing, tray icons
   of the applications you use.
+- Fullscreen: Super+Ctrl+F puts the window on its own workspace (an app entry in the rail)
+  and back; holding the pointer at the left or bottom edge for 150 ms slides the rail or
+  the bar over it. In a game that locks the pointer the edges must do nothing.
+- Canvas: Super+wheel zooms continuously at the pointer (`wheel-zoom-factor` in
+  `modules/desktop/niri/layout.nix` sets the speed), text stays readable at zoom 0.4,
+  title labels appear below zoom 0.7.
+- Motion at the real refresh rate (the nested session runs at 60 Hz): overlays opening and
+  closing, the strip ↔ canvas switch, the scratchpad slide. `ashd.shell.reduceMotion = true`
+  leaves only short fades.
 
 Monitor modes: leave the refresh rate out (`mode = "1920x1080"`) to get the highest one. A
 rate must match a mode from `niri msg outputs` to three decimals; anything else silently

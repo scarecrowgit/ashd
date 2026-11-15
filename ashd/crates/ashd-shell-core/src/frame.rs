@@ -64,14 +64,24 @@ pub fn bar_row_right_pad(t: &Theme, scratch_visible: bool) -> Pixels {
     if t.layout == LayoutVariant::Floating && scratch_visible { px(metrics::SCRATCH_W) + t.gap } else { px(0.) }
 }
 
-/// Whether the active window on `output` is fullscreen. niri-ipc has no fullscreen flag;
+/// Whether a fullscreen window covers `output`: the visible workspace is a fullscreen
+/// workspace (the compositor's `fullscreen-workspaces`; exact), else the active window is
+/// fullscreen. Only the *passive overlay chrome* (strip header, canvas chip, minimap) asks:
+/// it lives on the overlay layer, which the compositor draws over fullscreen windows. The
+/// bar and the rail are on the top layer and never ask: the compositor covers them and
+/// reveals them on an edge dwell, and they must always render their real content.
+///
+/// niri-ipc has no fullscreen flag for a window on an ordinary workspace;
 /// a fullscreen tile is exactly the output's logical size (measured in the nested session:
 /// `fullscreen-window` → tile 1920×1080; `maximize-column` → 1424×984, never the output
 /// size while the bar's exclusive zone exists). Floating windows are excluded (a floating
 /// window can be sized to the output by hand).
 pub fn is_fullscreen(niri: &NiriState, output: &str) -> bool {
-    let Some(o) = niri.outputs.get(output).and_then(|o| o.logical) else { return false };
     let Some(ws) = niri.active_workspace(output) else { return false };
+    if ashd_niri::is_fullscreen_workspace(ws) {
+        return true;
+    }
+    let Some(o) = niri.outputs.get(output).and_then(|o| o.logical) else { return false };
     let Some(w) = ws.active_window_id.and_then(|id| niri.windows.get(&id)) else { return false };
     let (tw, th) = w.layout.tile_size;
     !w.is_floating && (tw - o.width as f64).abs() < 0.5 && (th - o.height as f64).abs() < 0.5
@@ -139,6 +149,8 @@ mod tests {
                 active_window_id: Some(w.id),
                 mode: Default::default(),
                 is_hidden: false,
+                fullscreen_window_id: None,
+                fullscreen_origin_id: None,
             }],
         });
         n.apply(Event::WindowsChanged { windows: vec![w] });
@@ -151,6 +163,19 @@ mod tests {
         assert!(!is_fullscreen(&state(win(7, (1424.0, 984.0), false)), "DP-1"));
         assert!(!is_fullscreen(&state(win(7, (1920.0, 1080.0), true)), "DP-1"));
         assert!(!is_fullscreen(&state(win(7, (1920.0, 1080.0), false)), "HDMI-A-1"));
+    }
+
+    #[test]
+    fn a_fullscreen_workspace_is_fullscreen_whatever_the_tile_size() {
+        let mut n = state(win(7, (1424.0, 984.0), false));
+        assert!(!is_fullscreen(&n, "DP-1"));
+        let mut fs = n.workspaces[&1].clone();
+        fs.id = 2;
+        fs.idx = 0;
+        fs.fullscreen_origin_id = Some(1);
+        fs.fullscreen_window_id = None; // its window has just left: still covered until the switch
+        n.apply(Event::WorkspacesChanged { workspaces: vec![fs] });
+        assert!(is_fullscreen(&n, "DP-1"));
     }
 
     #[test]

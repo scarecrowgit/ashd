@@ -30,7 +30,7 @@ use ashd_tokens::{
     metrics,
     motion::{EASE_OUT_CUBIC, timing},
 };
-use ashd_ui::{Icon, anim, icon, progress, theme};
+use ashd_ui::{Icon, anim, fx::{flip, follow, hover_wash}, icon, presence::Timing, progress, theme};
 
 use model::{Queue, Toast, age_label};
 
@@ -296,27 +296,22 @@ impl ToastsPanel {
                 None => glyph,
             });
 
-        // header: APP NAME ......... age (or the close button on hover)
-        let age = age_label(n.received, chrono::Local::now());
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .h(px(14.))
-            .font_family(t.font_mono.clone())
-            .text_size(px(metrics::type_scale::LABEL.0))
-            .text_color(t.fg_muted)
-            .child(div().flex_1().min_w_0().truncate().child(SharedString::from(n.app_name.to_uppercase())))
-            .child(
+        // header: APP NAME ......... age (cross-fades to the close button on hover)
+        let age = SharedString::from(age_label(n.received, chrono::Local::now()).to_uppercase());
+        let on_close = cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.close(id, cx);
+        });
+        let (s2, muted, radius) = (t.surface_2, t.fg_muted, t.radius_control);
+        let swap = follow(
+            SharedString::from(format!("toast-swap-{id}")),
+            if hovered { 1.0 } else { 0.0 },
+            Timing::new(timing::SWAP, anim::EASE_STANDARD),
+            move |p| {
                 div()
                     .relative()
                     .flex_none()
-                    .child(
-                        div()
-                            .child(SharedString::from(age.to_uppercase()))
-                            .opacity(if hovered { 0. } else { 1. }),
-                    )
+                    .child(div().child(age).opacity(1.0 - p))
                     .child(
                         div()
                             .id(SharedString::from(format!("toast-close-{id}")))
@@ -328,20 +323,27 @@ impl ToastsPanel {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(t.radius_control)
-                            .opacity(if hovered { 1. } else { 0. })
+                            .rounded(radius)
+                            .opacity(p)
                             .cursor_pointer()
-                            .hover({
-                                let s2 = t.surface_2;
-                                move |s| s.bg(s2).text_color(gpui::white())
-                            })
-                            .child(icon(Icon::Close, 11.).text_color(t.fg_muted))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.close(id, cx);
-                            })),
-                    ),
-            );
+                            .child(hover_wash(s2, None, radius))
+                            .child(icon(Icon::Close, 11.).text_color(muted))
+                            .on_click(on_close),
+                    )
+            },
+        )
+        .fade();
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .h(px(14.))
+            .font_family(t.font_mono.clone())
+            .text_size(px(metrics::type_scale::LABEL.0))
+            .text_color(t.fg_muted)
+            .child(div().flex_1().min_w_0().truncate().child(SharedString::from(n.app_name.to_uppercase())))
+            .child(swap);
 
         let mut text = div().flex().flex_col().gap(px(4.)).flex_1().min_w_0().child(header);
         if !n.summary.is_empty() {
@@ -393,10 +395,7 @@ impl ToastsPanel {
                     .text_color(t.fg)
                     .whitespace_nowrap()
                     .cursor_pointer()
-                    .hover({
-                        let s2 = t.surface_2;
-                        move |s| s.bg(s2)
-                    })
+                    .child(hover_wash(t.surface_2, None, t.radius_control))
                     .child(SharedString::from(a.label.clone()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -491,7 +490,7 @@ impl Render for ToastsPanel {
                 let id = toast.n.id;
                 let card = self.card(toast, cx);
                 let frame = div().relative().child(hit_area(card));
-                if toast.exiting() {
+                let animated = if toast.exiting() {
                     frame
                         .with_animation(
                             SharedString::from(format!("toast-out-{id}")),
@@ -507,7 +506,9 @@ impl Render for ToastsPanel {
                             |el, p| el.opacity(p).left(px(-SLIDE * (1.0 - p))),
                         )
                         .into_any_element()
-                }
+                };
+                // A card that arrives or leaves moves the ones around it: they glide.
+                flip(SharedString::from(format!("toast-flip-{id}")), animated).into_any_element()
             })
             .collect();
 

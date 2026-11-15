@@ -14,7 +14,14 @@ use gpui::{
 };
 use ashd_shell_core::{Panel, PanelContext, PanelId, Placement, hit_area};
 use ashd_tokens::{LayoutVariant, metrics};
-use ashd_ui::{Icon, icon, label, theme};
+use ashd_ui::{
+    Icon,
+    anim::{EASE_OUT_EXPO, EASE_OUT_QUAD, timing},
+    fx::fade_slide,
+    icon, label,
+    presence::{PresenceList, Timing},
+    theme,
+};
 
 use crate::capture::clock;
 
@@ -97,10 +104,23 @@ pub fn dot_lit(elapsed_ms: u128) -> bool {
     (elapsed_ms / 600).is_multiple_of(2)
 }
 
+/// What the HUD shows, kept while it leaves (the shared [`Hud`] state is already `None`).
+#[derive(Clone)]
+enum HudItem {
+    Rec(Recording),
+    Countdown(Countdown),
+    Toast(Toast),
+}
+
 /// Passive overlay panel: one per display.
 pub struct ScreenshotHudPanel {
     ctx: PanelContext,
     hud: Entity<Hud>,
+    /// What is drawn: each part fades in and out (the passive surface stays until the last
+    /// one has left).
+    items: PresenceList<&'static str, HudItem>,
+    /// The surface was live at the last render (to tell the host when the exit is over).
+    was_live: bool,
 }
 
 impl ScreenshotHudPanel {
@@ -118,22 +138,47 @@ impl Panel for ScreenshotHudPanel {
     fn new(ctx: PanelContext, cx: &mut Context<Self>) -> Self {
         let hud = shared(cx);
         cx.observe(&hud, |_, _, cx| cx.notify()).detach();
-        Self { ctx, hud }
+        let items = PresenceList::new(
+            Timing::new(timing::ITEM_IN, EASE_OUT_EXPO),
+            Timing::new(timing::ITEM_OUT, EASE_OUT_QUAD),
+        )
+        .animate_first();
+        Self { ctx, hud, items, was_live: false }
     }
 
     fn is_live(&self, cx: &App) -> bool {
-        self.output(cx).is_some_and(|o| self.hud.read(cx).visible_on(&o))
+        // Parts that are still leaving keep the surface.
+        !self.items.is_empty() || self.output(cx).is_some_and(|o| self.hud.read(cx).visible_on(&o))
     }
 }
 
 impl Render for ScreenshotHudPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let Some(output) = self.output(cx) else { return div() };
         let hud = self.hud.read(cx);
-        let countdown = hud.countdown.clone().filter(|c| c.output == output);
-        let recording = hud.recording.clone().filter(|r| r.output == output);
-        let toast = hud.toast.clone().filter(|x| x.output == output);
+        let mut current: Vec<(&'static str, HudItem)> = Vec::new();
+        if let Some(r) = hud.recording.clone().filter(|r| r.output == output) {
+            current.push(("rec", HudItem::Rec(r)));
+        }
+        if let Some(c) = hud.countdown.clone().filter(|c| c.output == output) {
+            current.push(("countdown", HudItem::Countdown(c)));
+        }
+        if let Some(x) = hud.toast.clone().filter(|x| x.output == output) {
+            current.push(("toast", HudItem::Toast(x)));
+        }
+        let now = std::time::Instant::now();
+        self.items.sync(now, current);
+        let shown: Vec<_> = self.items.entries(now).to_vec();
+        if self.items.is_animating(now) {
+            window.request_animation_frame();
+        }
+        // The last part has left: tell the overlay host, which then drops the surface.
+        let live = !shown.is_empty();
+        if self.was_live && !live {
+            self.ctx.shell.refresh_overlays(cx);
+        }
+        self.was_live = live;
 
         let margin = match t.layout {
             LayoutVariant::Floating => f32::from(t.gap),
@@ -148,74 +193,95 @@ impl Render for ScreenshotHudPanel {
         let right = 20.0 + if scratch { metrics::SCRATCH_W + margin } else { 0.0 };
 
         let mut root = div().size_full().relative().font_family(t.font_sans.clone()).text_color(t.fg);
-
-        if let Some(rec) = recording {
-            let elapsed = rec.started.elapsed();
-            let lit = dot_lit(elapsed.as_millis());
-            let hud_entity = self.hud.clone();
-            let chip = div()
-                .id("rec-chip")
-                .h(px(metrics::CONTROL_H))
-                .px(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .bg(t.surface)
-                .border_1()
-                .border_color(t.err)
-                .rounded(t.radius_control)
-                .cursor_pointer()
-                .on_click(move |_: &ClickEvent, _, cx| hud_entity.update(cx, |_, cx| cx.emit(HudEvent::StopRecording)))
-                .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(t.err).opacity(if lit && !rec.stopping { 1.0 } else { 0.2 }))
-                .child(
-                    div()
-                        .font_family(t.font_mono.clone())
-                        .text_size(px(11.5))
-                        .text_color(t.fg)
-                        .child(SharedString::from(format!("REC {}", clock(elapsed.as_secs())))),
-                )
-                .child(label(if rec.stopping { "saving…" } else { "click to stop" }, cx));
-            root = root.child(div().absolute().top(px(20.)).right(px(right)).child(hit_area(chip)));
-        }
-
-        if let Some(c) = countdown {
-            let hud_entity = self.hud.clone();
-            let chip = div()
-                .id("countdown-chip")
-                .h(px(metrics::CONTROL_H))
-                .px(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .bg(t.surface)
-                .border_1()
-                .border_color(t.accent)
-                .rounded(t.radius_control)
-                .cursor_pointer()
-                .on_click(move |_: &ClickEvent, _, cx| hud_entity.update(cx, |_, cx| cx.emit(HudEvent::CancelCountdown)))
-                .child(icon(if c.record { Icon::Record } else { Icon::Camera }, metrics::icon_size::DENSE).text_color(t.accent))
-                .child(
-                    div()
-                        .font_family(t.font_mono.clone())
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.fg)
-                        .child(SharedString::from(c.left.to_string())),
-                )
-                .child(label(if c.record { "recording starts · click to cancel" } else { "capture · click to cancel" }, cx));
-            root = root.child(div().absolute().top(px(20.)).left_0().right_0().flex().justify_center().child(hit_area(chip)));
-        }
-
-        if let Some(toast) = toast {
-            root = root.child(
-                div()
-                    .absolute()
-                    .right(px(right.max(14.0 + margin)))
-                    .bottom(px(f32::from(t.bar_h) + margin + 14.0))
-                    .child(hit_area(self.toast_card(&toast, cx))),
-            );
+        for entry in shown {
+            let (fade, travel) = (entry.presence.value(now), entry.presence.movement(now));
+            match entry.value {
+                HudItem::Rec(rec) => {
+                    let chip = self.rec_chip(&rec, cx);
+                    root = root.child(fade_slide(div().absolute().top(px(20.)).right(px(right)).child(hit_area(chip)), fade, travel, -6.0));
+                }
+                HudItem::Countdown(c) => {
+                    let chip = self.countdown_chip(&c, cx);
+                    root = root.child(fade_slide(
+                        div().absolute().top(px(20.)).left_0().right_0().flex().justify_center().child(hit_area(chip)),
+                        fade,
+                        travel,
+                        -6.0,
+                    ));
+                }
+                HudItem::Toast(toast) => {
+                    // The result toast comes in from the right edge it sits at.
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .right(px(right.max(14.0 + margin) - 16.0 * (1.0 - travel)))
+                            .bottom(px(f32::from(t.bar_h) + margin + 14.0))
+                            .opacity(fade)
+                            .child(hit_area(self.toast_card(&toast, cx))),
+                    );
+                }
+            }
         }
         root
+    }
+}
+
+impl ScreenshotHudPanel {
+    fn rec_chip(&self, rec: &Recording, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let t = theme(cx).clone();
+        let elapsed = rec.started.elapsed();
+        let lit = dot_lit(elapsed.as_millis());
+        let hud_entity = self.hud.clone();
+        div()
+            .id("rec-chip")
+            .h(px(metrics::CONTROL_H))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .bg(t.surface)
+            .border_1()
+            .border_color(t.err)
+            .rounded(t.radius_control)
+            .cursor_pointer()
+            .on_click(move |_: &ClickEvent, _, cx| hud_entity.update(cx, |_, cx| cx.emit(HudEvent::StopRecording)))
+            .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(t.err).opacity(if lit && !rec.stopping { 1.0 } else { 0.2 }))
+            .child(
+                div()
+                    .font_family(t.font_mono.clone())
+                    .text_size(px(11.5))
+                    .text_color(t.fg)
+                    .child(SharedString::from(format!("REC {}", clock(elapsed.as_secs())))),
+            )
+            .child(label(if rec.stopping { "saving…" } else { "click to stop" }, cx))
+    }
+
+    fn countdown_chip(&self, c: &Countdown, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let t = theme(cx).clone();
+        let hud_entity = self.hud.clone();
+        div()
+            .id("countdown-chip")
+            .h(px(metrics::CONTROL_H))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .bg(t.surface)
+            .border_1()
+            .border_color(t.accent)
+            .rounded(t.radius_control)
+            .cursor_pointer()
+            .on_click(move |_: &ClickEvent, _, cx| hud_entity.update(cx, |_, cx| cx.emit(HudEvent::CancelCountdown)))
+            .child(icon(if c.record { Icon::Record } else { Icon::Camera }, metrics::icon_size::DENSE).text_color(t.accent))
+            .child(
+                div()
+                    .font_family(t.font_mono.clone())
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.fg)
+                    .child(SharedString::from(c.left.to_string())),
+            )
+            .child(label(if c.record { "recording starts · click to cancel" } else { "capture · click to cancel" }, cx))
     }
 }
 

@@ -10,7 +10,7 @@ use gpui::{
 };
 use ashd_svc_bluetooth::{BluetoothState, Busy, Device, DeviceKind, PairingKind, PairingReply, PairingRequest};
 use ashd_tokens::metrics;
-use ashd_ui::{Icon, TextInput, TextInputEvent, icon, label, theme};
+use ashd_ui::{Icon, TextInput, TextInputEvent, hover_wash, icon, label, theme};
 
 use crate::{
     QuickSettingsPanel, tile,
@@ -178,7 +178,7 @@ impl QuickSettingsPanel {
                     .gap(px(10.))
                     .when(row_action(d) != RowAction::Nothing, |r| r.cursor_pointer())
                     .when(menu_open, |r| r.bg(t.surface_2))
-                    .when(!menu_open, |r| r.hover(move |s| s.bg(s2)))
+                    .when(!menu_open, |r| r.child(hover_wash(s2, None, t.radius_control)))
                     .child(icon(device_icon(d.kind), 14.).text_color(if d.connected { t.accent } else { t.fg }))
                     .child(
                         div()

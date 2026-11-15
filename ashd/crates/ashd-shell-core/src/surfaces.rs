@@ -29,10 +29,16 @@ use gpui::{
     WindowHandle, WindowKind, WindowOptions, canvas, div, layer_shell::*, point, prelude::*, px, size,
 };
 use ashd_tokens::{DockVariant, LayoutVariant, metrics};
-use ashd_ui::{Theme, theme};
+use ashd_ui::{
+    Theme,
+    anim::{SPRING_SCRATCHPAD, SpringValue},
+    presence::{Presence, Timing},
+    theme,
+};
+use ashd_tokens::motion::{EASE_OUT_EXPO, EASE_OUT_QUAD, EASE_STANDARD, timing};
 
 use crate::{
-    Placement, Shell, Slot, frame,
+    PanelId, Placement, Shell, Slot, frame,
     overlay::{self, HitState},
     panel::{PanelContext, PanelInstance},
 };
@@ -291,15 +297,34 @@ pub struct SurfaceRoot {
     pub(crate) hit: Rc<RefCell<HitState>>,
     /// Viewport size at the last render (reported by `ashd status`).
     pub size: Size<Pixels>,
-    /// Bar only: the active window of this display is fullscreen → the bottom row is not
-    /// drawn ("dock: hide on fullscreen"; niri also draws the top layer below fullscreen
-    /// windows, so this mostly saves the dock's re-renders).
-    pub(crate) fullscreen: bool,
     /// Modal overlay only: the root focus target (key-ups must reach the root).
     pub(crate) focus: Option<gpui::FocusHandle>,
     /// Modal overlay only: closed, kept until the keys pressed in it are released
     /// (`overlay.rs`, "key repeat across modal surfaces").
     pub(crate) lingering: bool,
+    /// Modal overlay only: how far the panel has appeared (`overlay.rs`, "motion").
+    pub(crate) presence: Presence,
+    /// Modal overlay only: dismissed and leaving; drawn, but with no input.
+    pub(crate) closing: bool,
+    /// Modal overlay only: the panel this surface shows (it keeps showing it while it
+    /// leaves, after `Shell::modal` has moved on).
+    pub(crate) modal_panel: Option<PanelId>,
+    /// Modal overlay only: the input region is empty (closing).
+    pub(crate) region_closed: bool,
+    /// Scratchpad only: 0 = beyond the screen edge, 1 = in place (spring 1.0 / 700).
+    pub(crate) slide: SpringValue,
+    /// Scratchpad only: leaving; the surface goes when the slide is done.
+    pub(crate) leaving: bool,
+    /// Frame surfaces: how far the content is shown. Surfaces recreated by a theme switch
+    /// that changes the frame shape (their windows cannot be resized in place) fade in over
+    /// the theme crossfade instead of popping. (Never tied to fullscreen: the compositor
+    /// covers the bar and the rail over a fullscreen window and slides them in on an edge
+    /// dwell, so they always render their real content.)
+    pub(crate) appear: Presence,
+}
+
+fn appear_timings() -> (Timing, Timing) {
+    (Timing::new(timing::PAGE, EASE_OUT_EXPO), Timing::new(timing::ITEM_OUT, EASE_OUT_QUAD))
 }
 
 impl SurfaceRoot {
@@ -313,9 +338,6 @@ impl SurfaceRoot {
 
     /// The bottom row for the theme's `DockVariant` (see [`crate::frame`]).
     fn render_bar(&self, t: &Theme, cx: &App) -> gpui::AnyElement {
-        if self.fullscreen {
-            return div().size_full().into_any_element();
-        }
         let floating = t.layout == LayoutVariant::Floating;
         let start = || self.slot(Slot::BarStart);
         let center = || self.slot(Slot::BarCenter).into_iter().map(|v| div().flex_none().h_full().child(v));
@@ -330,24 +352,29 @@ impl SurfaceRoot {
                 .when(!floating, |d| d.border_t_1())
                 .flex()
                 .flex_row()
-                .child(
+                // The status block hugs its content (at most STATUS_W); the fixed-width
+                // wrapper keeps the dock where the design puts it.
+                .child(div().flex_none().h_full().w(px(metrics::STATUS_W)).flex().flex_row().child(
                     div()
-                        .flex_none()
                         .h_full()
-                        .w(px(metrics::STATUS_W))
+                        .max_w(px(metrics::STATUS_W))
                         .border_r_1()
                         .border_color(t.line)
                         .flex()
                         .flex_row()
                         .children(start()),
-                )
+                ))
                 .child(div().flex_1().min_w_0().h_full().relative().flex().flex_row().children(self.slot(Slot::BarCenter)))
                 .child(div().flex_none().h_full().flex().flex_row().children(self.slot(Slot::BarEnd)))
                 .into_any_element(),
             // Split / Pill: transparent surface; status pill, gap, then the row that ends
             // at the main area's right edge.
             DockVariant::Split | DockVariant::Pill => {
-                let status = frame::frame_box(t).flex_none().h_full().w(px(metrics::STATUS_W)).flex().flex_row().children(start());
+                // The pill hugs its content (at most STATUS_W); the fixed-width wrapper keeps
+                // the dock pills where the design puts them.
+                let status = div().flex_none().h_full().w(px(metrics::STATUS_W)).flex().flex_row().child(
+                    frame::frame_box(t).h_full().max_w(px(metrics::STATUS_W)).flex().flex_row().children(start()),
+                );
                 let row = if t.dock == DockVariant::Split {
                     // The dock view spreads its two pills; the end view is the third pill.
                     div()
@@ -390,6 +417,7 @@ impl SurfaceRoot {
 impl Render for SurfaceRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.size = window.viewport_size();
+        crate::framelog::frame(self.kind);
         let t = theme(cx).clone();
         let floating = t.layout == LayoutVariant::Floating;
         let frame = |d: gpui::Div| {
@@ -400,14 +428,30 @@ impl Render for SurfaceRoot {
                 .border_color(t.frame)
                 .when(floating, |d| d.border_1().rounded(t.radius_panel))
         };
+        let now = std::time::Instant::now();
+        if self.appear.is_animating(now) {
+            window.request_animation_frame();
+        }
+        let fade = self.appear.value(now);
         let el = match self.kind {
             SurfaceKind::Rail => frame(div()).when(!floating, |d| d.border_r_1()).flex().flex_col().children(self.slot(Slot::Rail)).into_any_element(),
-            SurfaceKind::Scratchpad => frame(div())
-                .when(!floating, |d| d.border_l_1())
-                .flex()
-                .flex_col()
-                .children(self.slot(Slot::Scratchpad))
-                .into_any_element(),
+            SurfaceKind::Scratchpad => {
+                // Slides in from (and back out to) the right screen edge: the surface is
+                // exactly the panel's size, so what is beyond its edge is clipped.
+                let (at, moving) = self.slide.drawn_now();
+                if moving {
+                    window.request_animation_frame();
+                }
+                let travel = f32::from(window.viewport_size().width);
+                frame(div())
+                    .relative()
+                    .left(px(travel * (1.0 - at)))
+                    .when(!floating, |d| d.border_l_1())
+                    .flex()
+                    .flex_col()
+                    .children(self.slot(Slot::Scratchpad))
+                    .into_any_element()
+            }
             SurfaceKind::Bar => self.render_bar(&t, cx),
             SurfaceKind::OverlayPassive => overlay::render_passive(self, window, cx).into_any_element(),
             SurfaceKind::OverlayModal => overlay::render_modal(self, window, cx).into_any_element(),
@@ -433,7 +477,7 @@ impl Render for SurfaceRoot {
             }
         };
         // Every surface: hover never outlives the pointer (see `pointer_exit_reset`).
-        div().size_full().relative().child(el).child(overlay::pointer_exit_reset())
+        div().size_full().relative().opacity(fade).child(el).child(overlay::pointer_exit_reset())
     }
 }
 
@@ -441,11 +485,35 @@ impl Render for SurfaceRoot {
 // inside a `Shell` update — `open_window` renders the first frame synchronously and every
 // panel may read the shell. These functions take the entity and do small, explicit updates.
 
-/// Open one surface of `kind` on `display`.
+/// The scratchpad's slide: starts off-screen and springs in when `animate`, else in place.
+fn slide_start(kind: SurfaceKind, animate: bool) -> SpringValue {
+    if kind == SurfaceKind::Scratchpad && animate {
+        let mut s = SpringValue::new(0.0, SPRING_SCRATCHPAD);
+        s.set_target(1.0);
+        s
+    } else {
+        SpringValue::new(1.0, SPRING_SCRATCHPAD)
+    }
+}
+
+/// Open one surface of `kind` on `display` (no entrance motion for the scratchpad: shell
+/// start, theme-shape recreation).
 pub(crate) fn open_surface(
     shell: &Entity<Shell>,
     display: DisplayId,
     kind: SurfaceKind,
+    cx: &mut App,
+) -> anyhow::Result<WindowHandle<SurfaceRoot>> {
+    open_surface_with(shell, display, kind, false, false, cx)
+}
+
+/// [`open_surface`]; `animate` lets the scratchpad slide in.
+pub(crate) fn open_surface_with(
+    shell: &Entity<Shell>,
+    display: DisplayId,
+    kind: SurfaceKind,
+    animate: bool,
+    fade_in: bool,
     cx: &mut App,
 ) -> anyhow::Result<WindowHandle<SurfaceRoot>> {
     let (opts, slots) = {
@@ -467,23 +535,10 @@ pub(crate) fn open_surface(
         (opts, slots)
     };
     let weak = shell.downgrade();
-    let niri = shell.read(cx).services.niri.state.clone();
     let handle = cx.open_window(opts, move |_, cx| {
         cx.new(|cx| {
             if let Some(shell) = weak.upgrade() {
                 cx.observe(&shell, |_, _, cx| cx.notify()).detach();
-            }
-            if kind == SurfaceKind::Bar {
-                // Re-render only when this display's fullscreen state flips.
-                cx.observe(&niri, |root: &mut SurfaceRoot, niri, cx| {
-                    let output = root.shell.upgrade().and_then(|s| s.read(cx).displays.get(&root.display)?.info.output.clone());
-                    let full = output.is_some_and(|o| frame::is_fullscreen(niri.read(cx), &o));
-                    if full != root.fullscreen {
-                        root.fullscreen = full;
-                        cx.notify();
-                    }
-                })
-                .detach();
             }
             SurfaceRoot {
                 kind,
@@ -492,9 +547,20 @@ pub(crate) fn open_surface(
                 slots,
                 hit: Default::default(),
                 size: Size::default(),
-                fullscreen: false,
                 focus: (kind == SurfaceKind::OverlayModal).then(|| cx.focus_handle()),
                 lingering: false,
+                presence: overlay::initial_presence(),
+                closing: false,
+                modal_panel: None,
+                region_closed: false,
+                slide: slide_start(kind, animate),
+                leaving: false,
+                appear: {
+                    let (enter, exit) = appear_timings();
+                    let enter = if fade_in { Timing::new(timing::THEME_CROSSFADE, EASE_STANDARD) } else { enter };
+                    let now = std::time::Instant::now();
+                    if fade_in { Presence::entering(enter, exit, now) } else { Presence::present(enter, exit, now) }
+                },
             }
         })
     })?;
@@ -547,6 +613,8 @@ pub(crate) fn sync_displays(shell: &Entity<Shell>, cx: &mut App) {
         if shell.read(cx).modal.as_ref().is_some_and(|m| m.display == id) {
             overlay::close_modal(shell, cx);
         }
+        flush_leaving(Some(id), cx);
+        overlay::flush_closing(Some(id), cx);
         for kind in SurfaceKind::CLOSE_ORDER {
             close_surface(shell, id, kind, cx);
         }
@@ -623,16 +691,133 @@ pub(crate) fn sync_shape(shell: &Entity<Shell>, cx: &mut App) {
     let Some(old) = old else { return };
     tracing::info!("frame shape changed {old:?} -> {key:?}: recreating frame surfaces");
     for id in ids {
+        flush_leaving(Some(id), cx);
         for kind in [SurfaceKind::ScratchpadZone, SurfaceKind::Scratchpad, SurfaceKind::Rail, SurfaceKind::Bar] {
             close_surface(shell, id, kind, cx);
         }
         for kind in frame_kinds(scratch, theme(cx)) {
-            if let Err(e) = open_surface(shell, id, kind, cx) {
+            if let Err(e) = open_surface_with(shell, id, kind, false, true, cx) {
                 tracing::error!("cannot reopen {} on {id:?}: {e:#}", kind.name());
             }
         }
     }
     shell.update(cx, |_, cx| cx.notify());
+}
+
+// ── the scratchpad slides ─────────────────────────────────────────────────────
+//
+// Showing creates the surface and springs the panel in from the right screen edge (spring
+// 1.0 / 700, `SPRING_SCRATCHPAD`); hiding keeps the surface until the same spring has taken
+// the panel out again. While it leaves the surface has no input and no exclusive zone (the
+// windows re-flow at once, niri animates them), and the floating zone keeper is gone.
+// Showing again while it leaves turns the spring around from where it is: no restart, no
+// second surface.
+
+/// Scratchpad surfaces that are sliding out, until their timer removes them.
+#[derive(Default)]
+struct LeavingFrames {
+    list: Vec<LeavingFrame>,
+    next: u64,
+}
+
+struct LeavingFrame {
+    handle: WindowHandle<SurfaceRoot>,
+    display: DisplayId,
+    kind: SurfaceKind,
+    token: u64,
+}
+
+impl gpui::Global for LeavingFrames {}
+
+/// Exit is over when the slide is within this fraction of the distance (0.5 % = under 2 px).
+const SLIDE_DONE: f32 = 0.005;
+
+/// The exclusive zone an attached scratchpad claims; floating ones keep -1 (zone keeper).
+fn attached_zone(theme: &Theme) -> Option<Pixels> {
+    (theme.layout == LayoutVariant::Attached).then(|| px(metrics::SCRATCH_W))
+}
+
+fn begin_leave(shell: &Entity<Shell>, display: DisplayId, kind: SurfaceKind, cx: &mut App) {
+    let handle = shell.update(cx, |s, _| s.displays.get_mut(&display).and_then(|d| d.windows.remove(&kind)));
+    let Some(h) = handle else { return };
+    let attached = attached_zone(theme(cx)).is_some();
+    let left = h.update(cx, |root, window, cx| {
+        root.leaving = true;
+        root.slide.set_target(0.0); // towards the edge
+        if attached {
+            window.set_exclusive_zone(px(0.));
+        }
+        window.set_input_region(Some(&[]));
+        cx.notify();
+        root.slide.settle_within(SLIDE_DONE, std::time::Instant::now())
+    });
+    let Ok(wait) = left else {
+        remove_window(h, kind, 0, cx);
+        return;
+    };
+    let token = {
+        let l = cx.default_global::<LeavingFrames>();
+        l.next += 1;
+        l.list.push(LeavingFrame { handle: h, display, kind, token: l.next });
+        l.next
+    };
+    let on = display;
+    tracing::info!("{} on {:?} leaves ({} ms)", kind.name(), on, wait.as_millis());
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(wait + std::time::Duration::from_millis(16)).await;
+        cx.update(|cx| finish_leave(token, cx));
+    })
+    .detach();
+}
+
+fn finish_leave(token: u64, cx: &mut App) {
+    let l = cx.default_global::<LeavingFrames>();
+    let Some(ix) = l.list.iter().position(|l| l.token == token) else { return };
+    let gone = l.list.remove(ix);
+    remove_window(gone.handle, gone.kind, 0, cx);
+    tracing::info!("{} on {:?} removed after its exit", gone.kind.name(), gone.display);
+}
+
+/// Turn a leaving surface of `kind` back into the live one. False: none was leaving.
+fn revive_leaving(shell: &Entity<Shell>, display: DisplayId, kind: SurfaceKind, cx: &mut App) -> bool {
+    let l = cx.default_global::<LeavingFrames>();
+    let Some(ix) = l.list.iter().position(|l| l.display == display && l.kind == kind) else { return false };
+    let back = l.list.remove(ix);
+    let zone = attached_zone(theme(cx));
+    let ok = back
+        .handle
+        .update(cx, |root, window, cx| {
+            root.leaving = false;
+            root.slide.set_target(1.0);
+            if let Some(zone) = zone {
+                window.set_exclusive_zone(zone);
+            }
+            window.set_input_region(None);
+            cx.notify();
+        })
+        .is_ok();
+    if !ok {
+        remove_window(back.handle, kind, 0, cx);
+        return false;
+    }
+    shell.update(cx, |s, _| {
+        if let Some(ds) = s.displays.get_mut(&display) {
+            ds.windows.insert(kind, back.handle);
+        }
+    });
+    let on = display;
+    tracing::info!("{} on {:?}: exit reversed", kind.name(), on);
+    true
+}
+
+/// Remove the leaving scratchpad surfaces of `display` (all displays: `None`) now.
+pub(crate) fn flush_leaving(display: Option<DisplayId>, cx: &mut App) {
+    let l = cx.default_global::<LeavingFrames>();
+    let (gone, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut l.list).into_iter().partition(|l| display.is_none_or(|d| l.display == d));
+    l.list = keep;
+    for g in gone {
+        remove_window(g.handle, g.kind, 0, cx);
+    }
 }
 
 pub(crate) fn set_scratch_visible(shell: &Entity<Shell>, visible: bool, cx: &mut App) {
@@ -648,14 +833,16 @@ pub(crate) fn set_scratch_visible(shell: &Entity<Shell>, visible: bool, cx: &mut
             // Appended after the bar and rail: the floating scratchpad (zone -1) stacks
             // above the bar's transparent right end, its zone keeper only narrows windows.
             for kind in scratch_kinds(theme(cx)) {
-                if let Err(e) = open_surface(shell, id, kind, cx) {
+                if kind == SurfaceKind::Scratchpad && revive_leaving(shell, id, kind, cx) {
+                    continue;
+                }
+                if let Err(e) = open_surface_with(shell, id, kind, true, false, cx) {
                     tracing::error!("cannot open {}: {e:#}", kind.name());
                 }
             }
         } else {
-            for kind in [SurfaceKind::ScratchpadZone, SurfaceKind::Scratchpad] {
-                close_surface(shell, id, kind, cx);
-            }
+            close_surface(shell, id, SurfaceKind::ScratchpadZone, cx);
+            begin_leave(shell, id, SurfaceKind::Scratchpad, cx);
         }
     }
     shell.update(cx, |_, cx| cx.notify());

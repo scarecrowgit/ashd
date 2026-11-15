@@ -26,7 +26,7 @@ use std::{
 };
 
 use gpui::{
-    AnimationExt as _, App, Context, Div, ElementId, Entity, FocusHandle, FontWeight,
+    App, Context, Div, ElementId, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
 };
@@ -34,7 +34,9 @@ use ashd_ipc::{PanelOp, Request, Response};
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
 use ashd_svc_audio::{Device, Target};
 use ashd_tokens::{LayoutVariant, metrics, motion};
-use ashd_ui::{Icon, anim, icon, label, theme};
+use ashd_ui::{
+    Icon, Look, anim, follow, hover_wash, icon, label, mix, presence::{Presence, Timing}, state_layer, theme,
+};
 
 use crate::{
     identity::{Identity, format_uptime, read_proc_uptime},
@@ -58,6 +60,8 @@ pub struct QuickSettingsPanelState {
     pending_source: Option<(f32, Instant)>,
     /// Night light section expanded (temperature slider, mode selector).
     night_open: bool,
+    /// ... how far it has unfolded (`fold`).
+    night_view: Option<Presence>,
     /// Temperature slider position the user just set (0..=1).
     pending_temp: Option<(f32, Instant)>,
     /// Brightness the user just set, by display id.
@@ -98,6 +102,7 @@ impl Panel for QuickSettingsPanel {
             pending_sink: None,
             pending_source: None,
             night_open: false,
+            night_view: None,
             pending_temp: None,
             pending_brightness: HashMap::new(),
             conn: network::ConnState::default(),
@@ -141,6 +146,7 @@ impl Panel for QuickSettingsPanel {
         self.state.pending_temp = None;
         self.state.pending_brightness.clear();
         self.state.night_open = false;
+        self.state.night_view = None;
         self.connectivity_on_close(cx);
     }
 }
@@ -159,6 +165,46 @@ fn volume_icon(volume: f32, muted: bool) -> Icon {
     }
 }
 
+/// A section that unfolds when it opens and folds when it closes: 140 ms out-expo in,
+/// 100 ms out-quad out, like the rest of the popup's motion.
+pub(crate) mod fold {
+    use std::time::Instant;
+
+    use ashd_ui::{
+        anim::{EASE_OUT_EXPO, EASE_OUT_QUAD},
+        presence::{Presence, Timing},
+    };
+
+    use super::motion;
+
+    /// The section was opened / closed now.
+    pub(crate) fn set(view: &mut Option<Presence>, open: bool, now: Instant) {
+        let p = view.get_or_insert_with(|| {
+            let (enter, exit) = (
+                Timing::new(motion::timing::PAGE, EASE_OUT_EXPO),
+                Timing::new(motion::timing::ITEM_OUT, EASE_OUT_QUAD),
+            );
+            // Never animated before: it was either absent, or (closing) fully there.
+            if open { Presence::absent(enter, exit, now) } else { Presence::present(enter, exit, now) }
+        });
+        p.set_present(open, now);
+    }
+
+    /// Still on screen: open, or on its way out.
+    pub(crate) fn alive(open: bool, view: &Option<Presence>, now: Instant) -> bool {
+        open || view.is_some_and(|v| !v.is_gone(now))
+    }
+
+    /// (height progress, fade) of a section; fully unfolded when it never animated.
+    pub(crate) fn progress(view: &Option<Presence>, now: Instant) -> (f32, f32) {
+        view.map_or((1.0, 1.0), |v| (v.movement(now), v.value(now)))
+    }
+
+    pub(crate) fn animating(view: &Option<Presence>, now: Instant) -> bool {
+        view.is_some_and(|v| v.is_animating(now))
+    }
+}
+
 /// Percent for the mono readout.
 fn percent(v: f32) -> String {
     format!("{}", (v * 100.0).round() as i32)
@@ -172,48 +218,57 @@ fn effective(device: f32, pending: Option<(f32, Instant)>) -> f32 {
     }
 }
 
-/// A tile of the 2-column grid (54 high; on = accent fill with on-accent text).
+/// A tile of the 2-column grid (54 high; on = accent fill with on-accent text). Flipping
+/// `on` cross-fades fill, border and text (120 ms).
 fn tile(id: impl Into<ElementId>, ic: Icon, title: &str, sub: &str, on: bool, cx: &App) -> Stateful<Div> {
     let t = theme(cx).clone();
-    let (fg, sub_alpha) = if on { (t.on_accent, 0.8) } else { (t.fg, 0.8) };
-    let s2 = t.surface_2;
+    let (s2, accent, on_accent, line, fg_off) = (t.surface_2, t.accent, t.on_accent, t.line, t.fg);
+    let clear = gpui::transparent_black();
+    let (font_sans, font_mono) = (t.font_sans.clone(), t.font_mono.clone());
+    let (title, sub) = (SharedString::from(title.to_string()), SharedString::from(sub.to_string()));
+    let content = follow(
+        "tile-content",
+        if on { 1.0 } else { 0.0 },
+        Timing::new(motion::timing::SWAP, anim::EASE_STANDARD),
+        move |p| {
+            let fg = mix(fg_off, on_accent, p);
+            div()
+                .size_full()
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_color(fg)
+                .child(icon(ic, 16.).text_color(fg))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_family(font_sans)
+                                .text_size(px(metrics::type_scale::UI.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
+                        )
+                        .child(div().font_family(font_mono).text_size(px(10.5)).opacity(0.8).child(sub)),
+                )
+        },
+    )
+    .fade();
     div()
         .id(id)
         .h(px(54.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .gap(px(10.))
         .border_1()
-        .border_color(if on { t.accent } else { t.line })
+        .border_color(clear)
         .rounded(t.radius_control)
-        .when(on, |d| d.bg(t.accent))
-        .when(!on, |d| d.hover(move |s| s.bg(s2)))
-        .text_color(fg)
         .cursor_pointer()
-        .child(icon(ic, 16.).text_color(fg))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .font_family(t.font_sans.clone())
-                        .text_size(px(metrics::type_scale::UI.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(SharedString::from(title.to_string())),
-                )
-                .child(
-                    div()
-                        .font_family(t.font_mono.clone())
-                        .text_size(px(10.5))
-                        .opacity(sub_alpha)
-                        .child(SharedString::from(sub.to_string())),
-                ),
-        )
+        .child(state_layer("tile-fx", on, Look::new(clear, line), Look::new(accent, accent), t.radius_control))
+        .child(hover_wash(s2, None, t.radius_control))
+        .child(content)
 }
 
 /// One radio row of the audio-output list (30 high, accent border when selected).
@@ -229,10 +284,17 @@ fn radio_row(ix: usize, device: &Device, cx: &App) -> Stateful<Div> {
         .items_center()
         .gap(px(10.))
         .border_1()
-        .border_color(if selected { t.accent } else { gpui::transparent_black() })
+        .border_color(gpui::transparent_black())
         .rounded(t.radius_control)
         .cursor_pointer()
-        .when(!selected, |d| d.hover(move |s| s.bg(s2)))
+        .child(state_layer(
+            "sink-fx",
+            selected,
+            Look::new(gpui::transparent_black(), gpui::transparent_black()),
+            Look::new(gpui::transparent_black(), t.accent),
+            t.radius_control,
+        ))
+        .when(!selected, |d| d.child(hover_wash(s2, None, t.radius_control)))
         .child(
             div()
                 .size(px(12.))
@@ -341,6 +403,12 @@ impl Render for QuickSettingsPanel {
         let logind = self.ctx.services.logind.state.read(cx).clone();
         let sysinfo_uptime = self.ctx.services.sysinfo.state.read(cx).uptime;
         let current_theme = ashd_ui::current_theme_name(cx);
+
+        // The sections fold / unfold on the clock: frames only while one moves.
+        let now = Instant::now();
+        if fold::animating(&self.state.night_view, now) || fold::animating(&self.state.conn.view, now) {
+            window.request_animation_frame();
+        }
 
         // ── placement: bottom = bar_h + POPUP_GAP, left from the anchor ──
         let anchor = self.ctx.shell.modal_anchor(Self::ID, cx);
@@ -547,12 +615,7 @@ impl Render for QuickSettingsPanel {
             .bottom(px(bottom))
             .w(px(metrics::QUICK_SETTINGS_W))
             .text_color(t.fg)
-            .child(card)
-            .with_animation(
-                "qs-in",
-                anim::tween(motion::timing::SUBMENU_IN, anim::EASE_STANDARD),
-                |el, d| el.opacity(d),
-            );
+            .child(card);
         div().size_full().relative().child(panel)
     }
 }

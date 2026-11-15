@@ -10,7 +10,7 @@ use ashd_shell_core::{Panel, PanelContext, PanelId, Placement, Slot, frame};
 use ashd_tokens::{DockVariant, metrics};
 use ashd_ui::{Icon, icon, theme};
 
-use crate::{BoundsStore, caps, geom, ids, is_open, open_look, sep};
+use crate::{BoundsStore, caps, geom, hover_layer, ids, is_open, open_layer, sep};
 
 #[derive(Default)]
 pub struct BarEndState {}
@@ -32,8 +32,10 @@ impl BarEndPanel {
             Some(o) => niri.active_workspace(&o),
             None => niri.focused_workspace(),
         }?;
-        let n = niri.visible_number(ws.id).map_or(ws.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
-        Some((n, ws.name.clone(), niri.is_canvas(ws.id), ws.id))
+        // a fullscreen workspace has no number or name of its own: it is labelled as its desk
+        let desk = niri.desk(ws.id).unwrap_or(ws);
+        let n = niri.visible_number(desk.id).map_or(desk.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
+        Some((n, desk.name.clone(), niri.is_canvas(ws.id), ws.id))
     }
 
     /// Set this display's workspace to `mode` (`set-workspace-mode` acts on the focused
@@ -86,39 +88,66 @@ impl Panel for BarEndPanel {
 impl Render for BarEndPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        let (fg, muted, s2) = (t.fg, t.fg_muted, t.surface_2);
+        let (fg, muted) = (t.fg, t.fg_muted);
         let ws = self.workspace(cx);
         let canvas = ws.as_ref().is_some_and(|w| w.2);
 
-        let label = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(geom::END_LABEL_GAP))
-            .children(ws.as_ref().map(|(idx, ..)| caps(format!("{idx:02}"), geom::END_INDEX_SIZE, fg, &t)))
-            .children(ws.and_then(|(_, n, ..)| n).filter(|n| !n.is_empty()).map(|n| caps(n, metrics::type_scale::LABEL.0, muted, &t)))
-            .child(caps(if canvas { "canvas" } else { "scroll" }, metrics::type_scale::LABEL.0, muted, &t));
+        // "02 code scroll": a change of workspace, name or mode dips and comes back (120 ms)
+        let label_key = (ws.as_ref().map(|w| (w.0, w.1.clone())), canvas);
+        let label = ashd_ui::swap("bar-end-label", label_key, {
+            let t = t.clone();
+            move |p| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(geom::END_LABEL_GAP))
+                    .opacity(p)
+                    .children(ws.as_ref().map(|(idx, ..)| caps(format!("{idx:02}"), geom::END_INDEX_SIZE, t.fg, &t)))
+                    .children(ws.and_then(|(_, n, ..)| n).filter(|n| !n.is_empty()).map(|n| caps(n, metrics::type_scale::LABEL.0, t.fg_muted, &t)))
+                    .child(caps(if canvas { "canvas" } else { "scroll" }, metrics::type_scale::LABEL.0, t.fg_muted, &t))
+            }
+        });
 
         // The selected segment is this display's workspace mode (ashd fork; a stock niri
         // always reports Strip). Clicking the other one sets it (`set-workspace-mode`).
         let segment = |id: &'static str, ic: Icon, text: &'static str, active: bool| {
-            let color = if active { t.on_accent } else { muted };
+            let (accent, on_accent) = (t.accent, t.on_accent);
+            let (radius, sans) = (frame::nested_radius(&t), t.font_sans.clone());
+            let timing = ashd_ui::presence::Timing::new(ashd_ui::anim::motion::timing::SWAP, ashd_ui::anim::EASE_STANDARD);
+            let p = if active { 1.0 } else { 0.0 };
             div()
                 .id(id)
+                .relative()
                 .h(px(geom::SEG_H))
                 .px(px(geom::SEG_PAD_X))
                 .flex()
                 .items_center()
-                .gap(px(geom::SEG_ICON_GAP))
-                .rounded(frame::nested_radius(&t))
-                .font_family(t.font_sans.clone())
+                .rounded(radius)
+                .font_family(sans)
                 .text_size(px(geom::SEG_TEXT))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(color)
-                .when(active, |d| d.bg(t.accent))
-                .when(!active, |d| d.cursor_pointer().hover(move |s| s.bg(s2)))
-                .child(icon(ic, geom::SEG_ICON).text_color(color))
-                .child(text)
+                // the accent plate cross-fades between the two segments, the label with it
+                .child(
+                    ashd_ui::follow((id, 1u32), p, timing, move |p| {
+                        div().absolute().top_0().left_0().size_full().rounded(radius).bg(ashd_ui::mix(gpui::transparent_black(), accent, p))
+                    })
+                    .fade(),
+                )
+                .when(!active, |d| d.cursor_pointer().child(hover_layer(&t)))
+                .child(
+                    ashd_ui::follow((id, 2u32), p, timing, move |p| {
+                        let color = ashd_ui::mix(muted, on_accent, p);
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(geom::SEG_ICON_GAP))
+                            .text_color(color)
+                            .child(icon(ic, geom::SEG_ICON).text_color(color))
+                            .child(text)
+                    })
+                    .fade(),
+                )
         };
         let modes = div()
             .flex()
@@ -132,8 +161,7 @@ impl Render for BarEndPanel {
             .child(segment("bar-mode-canvas", Icon::Canvas, "Canvas", canvas).on_click(cx.listener(|this, _, _, cx| this.set_mode(true, cx))));
 
         let session_open = is_open(ids::SESSION, &self.ctx, cx);
-        let session = open_look(
-            div()
+        let session = div()
                 .id("bar-session")
                 .relative()
                 .flex_none()
@@ -143,16 +171,14 @@ impl Render for BarEndPanel {
                 .justify_center()
                 .rounded(t.radius_control)
                 .cursor_pointer()
-                .when(!session_open, |d| d.hover(move |s| s.bg(s2)))
+                .child(open_layer(session_open, &t))
+                .when(!session_open, |d| d.child(hover_layer(&t)))
                 .child(icon(Icon::Power, geom::SESSION_ICON).text_color(fg))
                 .child(self.bounds.track("session"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     let anchor = this.bounds.anchor("session", &this.ctx, cx);
                     this.ctx.shell.request(Request::Session { op: PanelOp::Toggle }, anchor, cx);
-                })),
-            session_open,
-            &t,
-        );
+                }));
 
         match t.dock {
             // Ash (desk-05 l.1745): "02 code scroll", modes │ session, 14 from the right.

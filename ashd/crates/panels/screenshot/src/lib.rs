@@ -124,6 +124,9 @@ impl Panel for ScreenshotPanel {
     const ID: PanelId = PanelId("screenshot");
     // The overlay draws its own dim (a hole around the selection), so no host scrim.
     const PLACEMENT: Placement = Placement::Modal(ModalStyle { scrim: false });
+    /// The overlay is a picture of the screen: it must be there at once and gone at once
+    /// (a fading dim would end up in the capture).
+    const MOTION: ashd_shell_core::PanelMotion = ashd_shell_core::PanelMotion::Instant;
 
     fn new(ctx: PanelContext, cx: &mut Context<Self>) -> Self {
         let hud = hud::shared(cx);

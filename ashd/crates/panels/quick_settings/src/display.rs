@@ -104,6 +104,7 @@ impl QuickSettingsPanel {
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.state.night_open = !this.state.night_open;
+                crate::fold::set(&mut this.state.night_view, this.state.night_open, std::time::Instant::now());
                 cx.notify();
             }))
             .child(icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.).text_color(fg));
@@ -117,13 +118,15 @@ impl QuickSettingsPanel {
 
     /// The expanded settings under the tile grid.
     pub(crate) fn night_light_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
-        if !self.state.night_open {
+        let now = Instant::now();
+        if !crate::fold::alive(self.state.night_open, &self.state.night_view, now) {
             return None;
         }
         let s = self.ctx.services.nightlight.state.read(cx).clone();
         if !night_light_visible(&s) {
             return None;
         }
+        let (unfold, fade) = crate::fold::progress(&self.state.night_view, now);
         let t = theme(cx).clone();
         let slider_value = match self.state.pending_temp {
             Some((v, at)) if at.elapsed() < std::time::Duration::from_millis(crate::PENDING_MS) => v,
@@ -150,7 +153,7 @@ impl QuickSettingsPanel {
             move |ix, _, _| handle.set_mode(MODES[(*ix).min(MODES.len() - 1)]),
             cx,
         );
-        Some(
+        let content = 
             div()
                 .p(px(12.))
                 .flex()
@@ -159,6 +162,7 @@ impl QuickSettingsPanel {
                 .border_1()
                 .border_color(t.line)
                 .rounded(t.radius_control)
+                .opacity(fade)
                 .child(
                     div()
                         .flex()
@@ -186,8 +190,8 @@ impl QuickSettingsPanel {
                         .gap(px(10.))
                         .child(div().min_w_0().flex_1().truncate().child(label(mode_hint(&s), cx)))
                         .child(modes),
-                ),
-        )
+                );
+        Some(div().child(ashd_ui::reveal("qs-night-reveal", unfold, move |_| content)))
     }
 
     /// One row per display; empty when the service is unavailable.

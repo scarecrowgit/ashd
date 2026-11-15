@@ -10,7 +10,7 @@
 //!
 //! Owner: shell frame.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use gpui::{
     AnimationExt as _, App, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -28,8 +28,11 @@ use ashd_svc_apps::App as DesktopApp;
 use ashd_tokens::{DockVariant, metrics};
 use ashd_ui::{
     Icon,
-    anim::{EASE_STANDARD, timing, tween},
-    icon, theme,
+    anim::{EASE_OUT_EXPO, EASE_OUT_QUAD, EASE_STANDARD, timing, tween},
+    fx::{follow, hover_wash, mix},
+    icon,
+    presence::{PresenceList, Timing},
+    theme,
 };
 
 /// Id of the launcher panel (no crate dependency between panels: ids only).
@@ -141,11 +144,26 @@ pub fn dock_items(pins: &[String], apps: &[DesktopApp], niri: &NiriState) -> Vec
     items
 }
 
-#[derive(Default)]
 pub struct DockState {
     /// Per item: (focused, generation) — a change restarts the 160 ms indicator tween.
     pub indicator: HashMap<String, (bool, u64)>,
     pub scroll_acc: f32,
+    /// The buttons as drawn: a new app's button grows in, a closed app's shrinks away and
+    /// the others glide (the row is laid out each frame while it moves).
+    items: PresenceList<String, DockItem>,
+}
+
+impl Default for DockState {
+    fn default() -> Self {
+        Self {
+            indicator: HashMap::new(),
+            scroll_acc: 0.0,
+            items: PresenceList::new(
+                Timing::new(timing::ITEM_IN, EASE_OUT_EXPO),
+                Timing::new(timing::ITEM_OUT, EASE_OUT_QUAD),
+            ),
+        }
+    }
 }
 
 pub struct DockPanel {
@@ -194,8 +212,10 @@ impl DockPanel {
             Some(o) => niri.active_workspace(&o),
             None => niri.focused_workspace(),
         }?;
-        let n = niri.visible_number(ws.id).map_or(ws.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
-        Some((n, ws.name.clone(), niri.is_canvas(ws.id)))
+        // a fullscreen workspace is labelled as its desk
+        let desk = niri.desk(ws.id).unwrap_or(ws);
+        let n = niri.visible_number(desk.id).map_or(desk.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
+        Some((n, desk.name.clone(), niri.is_canvas(ws.id)))
     }
 
     fn launcher_anchor(&self, cx: &App) -> Option<ModalAnchor> {
@@ -237,7 +257,7 @@ impl Panel for DockPanel {
 }
 
 impl Render for DockPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let apps: Arc<Vec<DesktopApp>> = self.ctx.services.apps.state.read(cx).apps.clone();
         let pins = ashd_shell_core::config(cx).dock.clone();
@@ -254,6 +274,12 @@ impl Render for DockPanel {
             seen.push(it.key.clone());
         }
         self.state.indicator.retain(|k, _| seen.contains(k));
+        let now = Instant::now();
+        self.state.items.sync(now, items.iter().map(|i| (i.key.clone(), i.clone())));
+        if self.state.items.is_animating(now) {
+            window.request_animation_frame();
+        }
+        let shown: Vec<_> = self.state.items.entries(now).to_vec();
 
         let launcher_open = self.ctx.shell.modal(cx).is_some_and(|m| m.panel == LAUNCHER);
         let bounds = self.launcher_bounds.clone();
@@ -270,7 +296,7 @@ impl Render for DockPanel {
             .rounded(t.radius_control)
             .cursor_pointer()
             .when(launcher_open, |d| d.bg(s2).border_color(accent))
-            .when(!launcher_open, |d| d.hover(move |s| s.bg(s2)))
+            .when(!launcher_open, |d| d.child(hover_wash(s2, None, t.radius_control)))
             .child(icon(Icon::Grid, geom::LAUNCHER_ICON).text_color(fg))
             .child(
                 gpui::canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full(),
@@ -281,7 +307,9 @@ impl Render for DockPanel {
             }));
 
         let app_size = frame::dock_app_size(&t);
-        let buttons = items.into_iter().enumerate().map(|(ix, item)| {
+        let buttons = shown.into_iter().map(|entry| {
+            let (fade, grow, alive) = (entry.presence.value(now), entry.presence.movement(now), entry.is_present());
+            let item = entry.value;
             let running = !item.windows.is_empty();
             let generation = self.state.indicator.get(&item.key).map(|e| e.1).unwrap_or(0);
             let glyph = app_glyph(item.app.as_ref(), &item.app_id);
@@ -315,8 +343,18 @@ impl Render for DockPanel {
             });
             let focused = item.focused;
             let (click, middle, wheel) = (item.clone(), item.clone(), item.clone());
-            div()
-                .id(("dock-app", ix as u64))
+            let radius = t.radius_control;
+            let key = item.key.clone();
+            // The focused app's plate fades in / out with the indicator (160 ms standard).
+            let plate = follow(
+                gpui::SharedString::from(format!("dock-plate-{key}")),
+                if focused { 1.0 } else { 0.0 },
+                Timing::new(timing::DOCK_INDICATOR, EASE_STANDARD),
+                move |p| div().absolute().top_0().left_0().size_full().rounded(radius).bg(mix(gpui::transparent_black(), s2, p)),
+            )
+            .fade();
+            let button = div()
+                .id(gpui::SharedString::from(format!("dock-app-{key}")))
                 .relative()
                 .flex_none()
                 .size(px(app_size))
@@ -324,18 +362,18 @@ impl Render for DockPanel {
                 .items_center()
                 .justify_center()
                 .rounded(t.radius_control)
-                .cursor_pointer()
-                .when(focused, |d| d.bg(s2))
-                .hover(move |s| s.bg(s2))
+                .when(alive, |d| d.cursor_pointer())
+                .child(plate)
+                .child(hover_wash(s2, None, radius))
                 .child(icon_el)
                 .children(indicator)
                 .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    if ev.standard_click() {
+                    if alive && ev.standard_click() {
                         this.activate(&click, cx);
                     }
                 }))
                 .on_aux_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    if ev.is_middle_click() {
+                    if alive && ev.is_middle_click() {
                         this.launch(&middle, cx);
                     }
                 }))
@@ -353,14 +391,24 @@ impl Render for DockPanel {
                             -(n as i32)
                         }
                     };
-                    if steps != 0 {
+                    if alive && steps != 0 {
                         this.cycle(&wheel, steps, cx);
                     }
-                }))
+                }));
+            // The button sits in a slot whose width follows the presence (grows in, shrinks
+            // away); the slot's margin carries the gap so a vanished app leaves no hole.
+            div()
+                .flex_none()
+                .h(px(app_size))
+                .w(px(app_size * grow))
+                .ml(px(geom::APP_GAP * grow))
+                .overflow_hidden()
+                .opacity(fade)
+                .child(button)
         });
 
         let has_apps = !pins.is_empty() || self.ctx.niri.read(cx).windows.values().any(|w| w.app_id.is_some());
-        let apps = div().flex().flex_none().items_center().gap(px(geom::APP_GAP)).children(buttons);
+        let apps = div().flex().flex_none().items_center().ml(px(-geom::APP_GAP)).children(buttons);
         let sep = || div().flex_none().w(px(1.)).h(px(geom::SEP_H)).bg(t.line);
         match t.dock {
             DockVariant::Bar => {

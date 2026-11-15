@@ -1,10 +1,10 @@
 //! System tray in the status block (after the keyboard-layout chip, before the bell):
 //! hidden while empty; Active and NeedsAttention items as 16px icons in 24px hit boxes
 //! (NeedsAttention with a warn dot), Passive ones — and whatever does not fit — behind a
-//! small chevron that opens the list of hidden items. The status pill is a fixed 560 px
-//! in every theme, so the tray area is `flex-1` with `min-width: 0` and clips: its width
-//! decides how many icons fit (measured after layout), never the other way round, and the
-//! bell cannot be pushed out.
+//! small chevron that opens the list of hidden items. The status block hugs its content up
+//! to `STATUS_W`: the bar computes the room the other items leave (`geom::tray_avail`), the
+//! plan fits the icons into it, and the area is as wide as what it draws (it clips, with
+//! `min-width: 0`, only if that estimate was short), so the bell is never pushed out.
 //!
 //! Mouse: left = `Activate` (or the menu when `ItemIsMenu`), middle = `SecondaryActivate`,
 //! right = the dbusmenu (else `ContextMenu`), wheel = `Scroll`. The menu itself is the
@@ -16,7 +16,7 @@
 //! pending menu, hover/tooltip, scroll accumulator, the hidden-item snapshot.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     rc::Rc,
     time::{Duration, Instant},
@@ -30,9 +30,15 @@ use gpui::{
 use ashd_shell_core::{ModalAnchor, Panel, PanelContext, PanelId, Placement, ShellHandle, frame};
 use ashd_svc_tray::{Orientation, Status, TrayItem, TrayState};
 use ashd_tokens::{LayoutVariant, metrics};
-use ashd_ui::{Icon, Theme, app_icon, icon, theme, tooltip};
+use ashd_ui::{
+    Icon, Theme,
+    anim::{EASE_OUT_EXPO, EASE_OUT_QUAD, motion::timing},
+    app_icon, icon,
+    presence::{PresenceList, Timing},
+    theme, tooltip,
+};
 
-use crate::{BarPanel, geom, ids, open_look};
+use crate::{BarPanel, geom, hover_layer, ids, open_layer};
 
 // ── what fits ─────────────────────────────────────────────────────────────────
 
@@ -84,6 +90,19 @@ pub enum MediaFit {
 pub struct RowPlan {
     pub tray: Plan,
     pub media: MediaFit,
+}
+
+/// Width of the whole tray area for a row of `avail` px (the now-playing title at its widest:
+/// a safe over-estimate).
+pub fn area_width(statuses: &[Status], avail: f32, media: bool) -> f32 {
+    let row = plan_row(statuses, avail, media);
+    let tray = tray_used(&row.tray);
+    let np = match row.media {
+        MediaFit::None => 0.0,
+        MediaFit::Glyph => geom::NOW_PLAYING_GLYPH_W,
+        MediaFit::Title(w) => geom::NOW_PLAYING_GLYPH_W + geom::NOW_PLAYING_TITLE_GAP + w,
+    };
+    np + tray + if np > 0.0 && tray > 0.0 { geom::TRAY_GAP } else { 0.0 }
 }
 
 /// Width the tray's drawn icons (+ chevron) take for `plan`.
@@ -346,10 +365,17 @@ impl ItemBounds {
 pub struct TrayBar {
     ui: Entity<TrayUi>,
     icons: ItemBounds,
-    /// Width of the tray area as laid out last frame.
-    area_w: Rc<Cell<Option<f32>>>,
     /// Ids behind the chevron in the plan last rendered.
     hidden: Rc<RefCell<Vec<String>>>,
+    /// The icons as drawn: a new one grows in, a gone one shrinks away.
+    presence: PresenceList<String, TrayItem>,
+    /// The now-playing control as drawn (its last look is kept while it fades out).
+    np: PresenceList<u8, (String, bool, MediaFit)>,
+    /// The overflow chevron (what is behind it is not drawn, so it is the tray's whole
+    /// presence when the row is crowded).
+    chev: PresenceList<u8, ()>,
+    /// Something is entering or leaving: the bar asks for frames.
+    pub(crate) animating: bool,
 }
 
 impl TrayBar {
@@ -358,7 +384,17 @@ impl TrayBar {
         cx.observe(&ctx.services.tray.state, |_, _, cx| cx.notify()).detach();
         // the open menu / flyout drives the icons' "open" look
         cx.observe(&ui, |_, _, cx| cx.notify()).detach();
-        Self { ui, icons: ItemBounds::default(), area_w: Rc::new(Cell::new(None)), hidden: Rc::new(RefCell::new(Vec::new())) }
+        let (enter, exit) = (Timing::new(timing::ITEM_IN, EASE_OUT_EXPO), Timing::new(timing::ITEM_OUT, EASE_OUT_QUAD));
+        // (a list's first `sync` only fills it: take that now, so the first item that ever
+        // arrives animates in)
+        let now = Instant::now();
+        let mut presence = PresenceList::new(enter, exit);
+        presence.sync(now, []);
+        let mut np = PresenceList::new(enter, exit);
+        np.sync(now, []);
+        let mut chev = PresenceList::new(enter, exit);
+        chev.sync(now, []);
+        Self { ui, icons: ItemBounds::default(), hidden: Rc::new(RefCell::new(Vec::new())), presence, np, chev, animating: false }
     }
 }
 
@@ -393,9 +429,9 @@ impl BarPanel {
     }
 
     fn tray_button(&self, item: &TrayItem, open: bool, t: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
-        let (s2, warn) = (t.surface_2, t.warn);
+        let warn = t.warn;
         let id = item.id.clone();
-        let el = div()
+        div()
             .id(ElementId::from(SharedString::from(format!("tray-{}", item.id))))
             .relative()
             .flex_none()
@@ -405,7 +441,8 @@ impl BarPanel {
             .justify_center()
             .rounded(t.radius_control)
             .cursor_pointer()
-            .when(!open, |d| d.hover(move |s| s.bg(s2)))
+            .child(open_layer(open, t))
+            .when(!open, |d| d.child(hover_layer(t)))
             .child(app_icon(item.display_icon().map(|p| p.as_path()), geom::TRAY_ICON, cx))
             .when(item.status == Status::NeedsAttention, |d| {
                 d.child(
@@ -446,16 +483,32 @@ impl BarPanel {
                 let anchor = this.icon_anchor(&id, cx);
                 let display = this.tray_display();
                 this.tray.ui.update(cx, |ui, cx| ui.hover(&id, anchor, display, *hovered, cx));
-            }));
-        open_look(el, open, t)
+            }))
     }
 
-    /// The tray area, or `None` while there is nothing to show.
-    pub(crate) fn tray_section(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// Room the tray area would take at `avail` (see [`area_width`]).
+    pub(crate) fn tray_area_width(&self, avail: f32, cx: &App) -> f32 {
+        let statuses: Vec<Status> = self.ctx.services.tray.state.read(cx).items.iter().map(|i| i.status).collect();
+        area_width(&statuses, avail, self.has_now_playing(cx))
+    }
+
+    /// Is there anything for the tray area to show (tray items or an active player)?
+    pub(crate) fn tray_present(&self, cx: &gpui::App) -> bool {
+        // (what is still fading out keeps the area, so it does not vanish under its exit)
+        !self.ctx.services.tray.state.read(cx).items.is_empty()
+            || self.has_now_playing(cx)
+            || !self.tray.presence.is_empty()
+            || !self.tray.np.is_empty()
+            || !self.tray.chev.is_empty()
+    }
+
+    /// The tray area, or `None` while there is nothing to show. `avail` is the room the
+    /// status row leaves it (`geom::tray_avail`); the area is as wide as what it draws.
+    pub(crate) fn tray_section(&mut self, t: &Theme, avail: f32, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let items = self.ctx.services.tray.state.read(cx).items.clone();
         // The now-playing control shares this area (and its width budget).
         let media = self.has_now_playing(cx);
-        if items.is_empty() && !media {
+        if items.is_empty() && !media && self.tray.presence.is_empty() && self.tray.np.is_empty() && self.tray.chev.is_empty() {
             self.bounds.forget("media", cx);
             return None;
         }
@@ -463,22 +516,68 @@ impl BarPanel {
             self.ctx.services.tray.state.read(cx).menu.as_ref().map(|m| m.item.clone())
         });
         let flyout_open = self.ctx.shell.modal(cx).is_some_and(|m| m.panel == ids::TRAY_OVERFLOW);
-        let width = self.tray.area_w.get().unwrap_or(geom::TRAY_INITIAL_W);
         let statuses: Vec<Status> = items.iter().map(|i| i.status).collect();
-        let row = plan_row(&statuses, width, media);
-        let now_playing = self.now_playing(row.media, t, cx);
+        let row = plan_row(&statuses, avail, media);
         let plan = row.tray;
         *self.tray.hidden.borrow_mut() = plan.hidden.iter().map(|&i| items[i].id.clone()).collect();
 
-        let buttons: Vec<Stateful<Div>> =
-            plan.shown.iter().map(|&i| self.tray_button(&items[i], open_menu.as_deref() == Some(items[i].id.as_str()), t, cx)).collect();
+        // What is drawn is kept for the length of its exit: an icon that went (or moved behind
+        // the chevron) shrinks away, a new one grows in, the player control fades.
+        let now = Instant::now();
+        self.tray.presence.sync(now, plan.shown.iter().map(|&i| (items[i].id.clone(), items[i].clone())));
+        let np_label = crate::nowplaying::now_playing_label(self.ctx.services.mpris.state.read(cx)).filter(|_| row.media != MediaFit::None);
+        self.tray.np.sync(now, np_label.map(|(title, playing)| (0u8, (title, playing, row.media))));
+        self.tray.chev.sync(now, (!plan.hidden.is_empty()).then_some((0u8, ())));
+        // (once everything has gone one more frame lets the bar drop the empty area)
+        self.tray.animating =
+            self.tray.presence.is_animating(now)
+                || self.tray.np.is_animating(now)
+                || self.tray.chev.is_animating(now)
+                || (items.is_empty() && !media);
+        if !media {
+            self.bounds.forget("media", cx);
+        }
+        let np_entries: Vec<_> = self.tray.np.entries(now).to_vec();
+        let now_playing: Vec<AnyElement> = np_entries
+            .into_iter()
+            .filter_map(|e| {
+                let v = e.presence.value(now);
+                let el = if e.is_present() {
+                    self.now_playing(row.media, t, cx).map(|el| el.into_any_element())
+                } else {
+                    let (title, playing, fit) = e.value;
+                    Some(BarPanel::now_playing_ghost(title, playing, fit, t).into_any_element())
+                };
+                el.map(|el| div().flex_none().opacity(v).child(el).into_any_element())
+            })
+            .collect();
+        let entries: Vec<_> = self.tray.presence.entries(now).to_vec();
+        let slots: Vec<AnyElement> = entries
+            .into_iter()
+            .map(|e| {
+                let (fade, grow) = (e.presence.value(now), e.presence.movement(now));
+                let open = open_menu.as_deref() == Some(e.key.as_str());
+                let button = self.tray_button(&e.value, open, t, cx);
+                div()
+                    .flex_none()
+                    .h(px(geom::TRAY_BOX))
+                    .w(px(geom::TRAY_BOX * grow))
+                    .ml(px(geom::TRAY_GAP * grow))
+                    .overflow_hidden()
+                    .opacity(fade)
+                    .child(button)
+                    .into_any_element()
+            })
+            .collect();
+        let buttons = (!slots.is_empty()).then(|| div().flex().flex_none().items_center().ml(px(-geom::TRAY_GAP)).children(slots));
 
-        let chevron = (!plan.hidden.is_empty()).then(|| {
-            let s2 = t.surface_2;
+        let chev_entries: Vec<_> = self.tray.chev.entries(now).to_vec();
+        let chevrons: Vec<AnyElement> = chev_entries.into_iter().map(|e| {
+            let (fade, grow) = (e.presence.value(now), e.presence.movement(now));
             let needs_attention = plan.hidden.iter().any(|&i| items[i].status == Status::NeedsAttention);
             let warn = t.warn;
             let hidden = self.tray.hidden.clone();
-            let el = div()
+            let chevron = div()
                 .id("tray-chevron")
                 .relative()
                 .flex_none()
@@ -489,7 +588,8 @@ impl BarPanel {
                 .justify_center()
                 .rounded(t.radius_control)
                 .cursor_pointer()
-                .when(!flyout_open, |d| d.hover(move |s| s.bg(s2)))
+                .child(open_layer(flyout_open, t))
+                .when(!flyout_open, |d| d.child(hover_layer(t)))
                 .child(icon(Icon::ChevronUp, geom::TRAY_CHEVRON_ICON).text_color(t.fg_muted))
                 .when(needs_attention, |d| {
                     d.child(div().absolute().top(px(geom::TRAY_DOT_INSET)).right(px(0.)).size(px(geom::TRAY_DOT)).rounded(px(geom::TRAY_DOT / 2.)).bg(warn))
@@ -505,33 +605,15 @@ impl BarPanel {
                     });
                     this.ctx.shell.toggle_modal(ids::TRAY_OVERFLOW, anchor, cx);
                 }));
-            open_look(el, flyout_open, t)
-        });
-
-        // Measure the area after layout: the next frame's plan uses it.
-        let (area_w, weak) = (self.tray.area_w.clone(), cx.weak_entity());
-        let measure = canvas(
-            move |bounds, _, cx| {
-                let w = f32::from(bounds.size.width);
-                if area_w.get().is_none_or(|old| (old - w).abs() > 0.5) {
-                    area_w.set(Some(w));
-                    let weak = weak.clone();
-                    cx.defer(move |cx| {
-                        weak.update(cx, |_, cx| cx.notify()).ok();
-                    });
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full();
+            // grows in and shrinks away with the icons
+            div().flex_none().h(px(geom::TRAY_BOX)).w(px(geom::TRAY_CHEVRON_W * grow)).overflow_hidden().opacity(fade).child(chevron).into_any_element()
+        }).collect();
 
         let area = div()
             .id("bar-tray")
             .relative()
-            .flex_1()
+            // as wide as its content; it gives way (clips) only if the estimate was short
+            .flex_shrink(1.0)
             .min_w_0()
             .overflow_hidden()
             .h(px(geom::TRAY_BOX))
@@ -540,8 +622,7 @@ impl BarPanel {
             .gap(px(geom::TRAY_GAP))
             .children(now_playing)
             .children(buttons)
-            .children(chevron)
-            .child(measure);
+            .children(chevrons);
         Some(area)
     }
 }

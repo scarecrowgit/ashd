@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use gpui::{
     AnimationExt as _, App, Context, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
+    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
 use ashd_svc_tray::{MenuKind, MenuNode, Toggle};
@@ -236,10 +236,10 @@ impl TrayMenuPanel {
             .font_family(t.font_sans.clone())
             .text_size(px(metrics::type_scale::UI.0))
             .text_color(fg)
-            .when(highlighted, |d| d.bg(s2));
+            // the highlight (pointer or keys) moves between rows by fading (120 ms)
+            .child(ashd_ui::select_plate(ElementId::NamedInteger("tray-menu-plate".into(), id as u64), highlighted, s2, None));
         row = if n.enabled {
             row.cursor_pointer()
-                .when(!highlighted, move |d| d.hover(move |s| s.bg(s2)))
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     if *hovered {
                         this.hover_row(depth, id, cx);
@@ -368,8 +368,7 @@ impl Render for TrayMenuPanel {
             .top(px(top))
             .track_focus(&self.focus)
             .key_context("TrayMenu")
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
-            .with_animation("tray-menu-in", tween(timing::SUBMENU_IN, EASE_OUT_QUAD), |el, p| el.opacity(p));
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)));
         root_el.child(built)
     }
 }

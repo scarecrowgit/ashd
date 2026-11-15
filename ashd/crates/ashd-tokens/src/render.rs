@@ -418,17 +418,23 @@ pub fn niri_gaps(t: &Tokens) -> f32 {
     }
 }
 
-/// Top strut of the working area. The shell draws its strip header over the top of the
-/// main area in every theme ([`metrics::STRIP_HEADER_STRUT`]); floating themes inset the
-/// frame panels by `gap` on every anchored edge and start the main area one gap below the
-/// screen edge, but there is no top panel to reserve that space with a layer-shell
-/// exclusive zone, so the gap is added to the strut. Attached (Ash): the header only.
+/// Top strut of the working area, under the strip header the shell draws over the top of the
+/// main area in every theme. The key chips of that header clear the nearest visible edge below
+/// them by the theme's layout gap:
+///
+/// - attached (Ash): the topmost window's focus ring, [`metrics::STRIP_HEADER_STRUT`] (the
+///   header's bottom edge plus the ring's reach, so ring and chips are `gap` apart);
+/// - floating: the work-area outline, which sits exactly at the strut. The main area starts
+///   one `gap` below the screen edge (no top panel reserves that with an exclusive zone, so the
+///   gap is part of the strut), the header ends `STRIP_HEADER_TOP + STRIP_HEADER_H` below that,
+///   and one more `gap` separates it from the outline.
 pub fn niri_top_strut(t: &Tokens) -> f32 {
-    let gap = match t.shape.layout {
-        LayoutVariant::Attached => 0.0,
-        LayoutVariant::Floating => t.shape.gap,
-    };
-    gap + metrics::STRIP_HEADER_STRUT
+    match t.shape.layout {
+        LayoutVariant::Attached => metrics::STRIP_HEADER_STRUT,
+        LayoutVariant::Floating => {
+            t.shape.gap + metrics::STRIP_HEADER_TOP + metrics::STRIP_HEADER_H + t.shape.gap
+        }
+    }
 }
 
 /// `work-area { }` block of the layout (ASHD-FORK.md "Work area outline and clip"): floating
@@ -823,15 +829,18 @@ mod tests {
         assert!(ash.contains("backdrop-color \"#111110\""));
         assert!(ash.contains("default-workspace-mode \"strip\""));
         // Attached layout: the strip header only; the fragment owns the top strut.
-        assert!(ash.contains("struts {\n        top 30\n    }"));
+        assert!(ash.contains("struts {\n        top 39\n    }"));
+        assert_eq!(metrics::STRIP_HEADER_STRUT, 39.0);
+        assert!(ash.contains(&format!("gap {}\n", metrics::WINDOW_RING_GAP)), "the ring gap the strut accounts for");
+        assert!(ash.contains(&format!("focus-ring {{\n        on\n        width {}\n", metrics::WINDOW_RING_W)));
         assert_eq!(niri_top_strut(tokens(ThemeName::Ash)), metrics::STRIP_HEADER_STRUT);
         let dusk = niri_kdl(tokens(ThemeName::Dusk));
         assert!(dusk.contains("gaps 12") && dusk.contains("geometry-corner-radius 8"));
-        assert!(dusk.contains("top 42"));
+        assert!(dusk.contains("top 58"));
         let moss = niri_kdl(tokens(ThemeName::Moss));
         assert!(moss.contains("gaps 8") && moss.contains("geometry-corner-radius 3"));
         let midnight = niri_kdl(tokens(ThemeName::Midnight));
-        assert!(midnight.contains("gaps 10") && midnight.contains("top 40"));
+        assert!(midnight.contains("gaps 10") && midnight.contains("top 54"));
         for name in ThemeName::ALL {
             let out = niri_kdl(tokens(name));
             assert_eq!(out.matches('{').count(), out.matches('}').count());
@@ -841,13 +850,13 @@ mod tests {
     #[test]
     fn niri_decorations_per_theme() {
         // (theme, grid, spacing, grid colour, mono font, default mode, top strut)
-        // strut = 30 (strip header) + theme gap when floating
+        // strut = 39 (strip header + focus ring reach) attached; floating: 34 (header bottom) + 2 x theme gap
         let rows = [
-            (ThemeName::Ash, "lines", "80", "#161615", "JetBrains Mono", "strip", "30"),
-            (ThemeName::Ink, "dots", "40", "#2A2E34", "IBM Plex Mono", "canvas", "40"),
-            (ThemeName::Midnight, "lines", "80", "#12151C", "Geist Mono", "strip", "40"),
-            (ThemeName::Moss, "dots", "40", "#262C26", "Geist Mono", "canvas", "38"),
-            (ThemeName::Dusk, "lines", "80", "#16131B", "JetBrains Mono", "strip", "42"),
+            (ThemeName::Ash, "lines", "80", "#161615", "JetBrains Mono", "strip", "39"),
+            (ThemeName::Ink, "dots", "40", "#2A2E34", "IBM Plex Mono", "canvas", "54"),
+            (ThemeName::Midnight, "lines", "80", "#12151C", "Geist Mono", "strip", "54"),
+            (ThemeName::Moss, "dots", "40", "#262C26", "Geist Mono", "canvas", "50"),
+            (ThemeName::Dusk, "lines", "80", "#16131B", "JetBrains Mono", "strip", "58"),
         ];
         for (name, grid, spacing, grid_color, mono, mode, strut) in rows {
             let t = tokens(name);

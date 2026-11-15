@@ -17,8 +17,8 @@ const GRACE: Duration = Duration::from_millis(140);
 
 pub struct RailHover {
     shell: ShellHandle,
-    /// Workspace the flyout shows, and its button index (vertical position).
-    pub shown: Option<(u64, usize)>,
+    /// Workspace the flyout shows, and the rail-local top of its entry.
+    pub shown: Option<(u64, f32)>,
     pub in_rail: bool,
     pub in_flyout: bool,
     /// Exit animation running.
@@ -32,12 +32,12 @@ impl RailHover {
         self.shown.is_some()
     }
 
-    /// Pointer entered workspace button `index` (workspace `ws`).
-    pub fn enter_button(&mut self, ws: u64, index: usize, cx: &mut Context<Self>) {
+    /// Pointer entered the entry of workspace `ws`, whose top is `top` (rail-local px).
+    pub fn enter_button(&mut self, ws: u64, top: f32, cx: &mut Context<Self>) {
         self.in_rail = true;
-        if self.shown != Some((ws, index)) || self.closing {
+        if self.shown != Some((ws, top)) || self.closing {
             let was_live = self.is_live();
-            self.shown = Some((ws, index));
+            self.shown = Some((ws, top));
             self.closing = false;
             self.generation += 1;
             cx.notify();

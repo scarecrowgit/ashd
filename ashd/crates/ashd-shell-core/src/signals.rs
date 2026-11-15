@@ -44,6 +44,7 @@ pub(crate) fn listen(rx: async_channel::Receiver<Signal>, shell: WeakEntity<Shel
                     tracing::info!("SIGHUP: reloaded config {:?}", config.sources);
                     cx.update(|cx| {
                         cx.set_global(config);
+                        crate::config::apply_motion(cx);
                         cx.refresh_windows();
                     });
                 }

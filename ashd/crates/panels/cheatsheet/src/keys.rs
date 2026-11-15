@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use ashd_tokens::WindowMode;
 use serde::Deserialize;
 
 /// One entry of `keybinds.json`.
@@ -97,6 +96,7 @@ pub fn key_label(key: &str) -> String {
         "xf86audiomicmute" => "Mic mute",
         "xf86monbrightnessup" => "Bright +",
         "xf86monbrightnessdown" => "Bright −",
+        "xf86audiostop" => "Stop",
         "xf86audioplay" => "Play",
         "xf86audionext" => "Next",
         "xf86audioprev" => "Prev",
@@ -125,21 +125,32 @@ pub fn chips(keys: &str) -> Vec<String> {
 
 // ── sections ──────────────────────────────────────────────────────────────────
 
+/// What a row does in each workspace mode. The sheet has no mode switcher: one row has to
+/// say what the key does in the strip and on the canvas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Modes {
+    /// The same in both modes (every plain niri action).
+    Both,
+    /// Only meaningful on a canvas workspace (`canvas-*` actions): drawn with a `canvas` tag.
+    Canvas,
+    /// `if-canvas { canvas-…; strip-action; }`: two lines, one per mode.
+    Split { canvas: String, strip: String },
+}
+
 /// One row of a section: a title and one or more key combinations (`Super+H` and `Super+M`
 /// for the same action share a row).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
+    /// The label; for [`Modes::Split`] rows the canvas half of it.
     pub title: String,
     pub combos: Vec<Vec<String>>,
-    /// Shown in both modes even in a canvas-only section: its niri action is
-    /// `if-canvas { …; … }` (e.g. Equal / Minus / 0 also act on strip workspaces).
-    pub both_modes: bool,
-    /// Lower-case text the filter matches: the title, the raw key names and the chip text.
+    pub modes: Modes,
+    /// Lower-case text the filter matches: the full title, the raw key names and the chip text.
     haystack: String,
 }
 
 impl Row {
-    fn new(title: String, raw_keys: &[String], combos: Vec<Vec<String>>) -> Self {
+    fn new(title: String, raw_keys: &[String], combos: Vec<Vec<String>>, action: &str) -> Self {
         let mut haystack = title.to_lowercase();
         for raw in raw_keys {
             haystack.push(' ');
@@ -149,21 +160,78 @@ impl Row {
             haystack.push(' ');
             haystack.push_str(&chip.to_lowercase());
         }
-        Row { title, combos, both_modes: false, haystack }
+        let (title, modes) = classify(&title, action);
+        Row { title, combos, modes, haystack }
+    }
+
+    /// Display height: split rows carry two lines.
+    pub fn height(&self) -> f32 {
+        match self.modes {
+            Modes::Split { .. } => SPLIT_ROW_H,
+            _ => ROW_H,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Section {
     pub name: String,
-    /// Shown only in the Canvas mode (the group name mentions the canvas).
-    pub canvas_only: bool,
     pub rows: Vec<Row>,
 }
 
-/// Group names that belong to the infinite canvas: only drawn under "Canvas".
-pub fn is_canvas_group(group: &str) -> bool {
-    group.to_lowercase().contains("canvas")
+/// `Zoom in (strip: wider column)` → (`Zoom in`, `Wider column`).
+fn split_title(title: &str) -> Option<(String, String)> {
+    let inner = title.trim_end().strip_suffix(')')?;
+    let at = inner.rfind("(strip:")?;
+    let canvas = inner[..at].trim();
+    let strip = inner[at + "(strip:".len()..].trim();
+    (!canvas.is_empty() && !strip.is_empty()).then(|| (canvas.to_string(), upper_first(strip)))
+}
+
+fn upper_first(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
+/// A niri action as a sentence: `focus-column-left` → `Focus column left`,
+/// `set-column-width "+10%"` → `Set column width +10%`.
+fn humanize(statement: &str) -> String {
+    upper_first(&statement.replace('-', " ").replace('"', ""))
+}
+
+/// The statements of an action: the body of `if-canvas { a; b; }` (or the action itself),
+/// and whether it was guarded.
+fn statements(action: &str) -> (bool, Vec<&str>) {
+    let a = action.trim();
+    let (guarded, body) = match a.strip_prefix("if-canvas") {
+        Some(rest) => (true, rest.trim().trim_start_matches('{').trim_end_matches('}')),
+        None => (false, a),
+    };
+    (guarded, body.split(';').map(str::trim).filter(|s| !s.is_empty()).collect())
+}
+
+fn is_canvas_statement(s: &str) -> bool {
+    s.starts_with("canvas-") || s == "toggle-window-pinned"
+}
+
+/// The label and mode meaning of a row from its title and niri action.
+fn classify(title: &str, action: &str) -> (String, Modes) {
+    let (guarded, stmts) = statements(action);
+    let strip_side: Vec<&&str> = stmts.iter().filter(|s| !is_canvas_statement(s)).collect();
+    if guarded && !strip_side.is_empty() {
+        return match split_title(title) {
+            Some((canvas, strip)) => (canvas.clone(), Modes::Split { canvas, strip }),
+            None => (title.to_string(), Modes::Split { canvas: title.to_string(), strip: humanize(strip_side[0]) }),
+        };
+    }
+    if !stmts.is_empty() && strip_side.is_empty() {
+        return (title.to_string(), Modes::Canvas);
+    }
+    // A title that spells out both modes without a guarded action (hand-written files).
+    match split_title(title) {
+        Some((canvas, strip)) => (canvas.clone(), Modes::Split { canvas, strip }),
+        None => (title.to_string(), Modes::Both),
+    }
 }
 
 /// A numbered series: `Mod+1`..`Mod+9` titled `Workspace 1`..`Workspace 9`.
@@ -232,8 +300,10 @@ fn group_rows(binds: &[&Bind]) -> Vec<Row> {
             },
         }
     }
-    // ashd canvas: a row whose binds run `if-canvas { …; … }` acts in both modes.
-    let both = |raw: &[String]| raw.iter().any(|k| binds.iter().any(|b| &b.keys == k && b.action.trim_start().starts_with("if-canvas")));
+    // The niri action of a row: that of its first bind (same-title binds share it).
+    let action_of = |raw: &[String]| {
+        raw.first().and_then(|k| binds.iter().find(|b| &b.keys == k)).map_or("", |b| b.action.as_str()).to_string()
+    };
     rows.into_iter()
         .enumerate()
         .map(|(ix, (title, raw))| match series_rows.iter().find(|(r, _)| *r == ix) {
@@ -242,11 +312,11 @@ fn group_rows(binds: &[&Bind]) -> Vec<Row> {
                 let (lo, hi) = (s.digits.iter().min().copied().unwrap_or(1), s.digits.iter().max().copied().unwrap_or(9));
                 let mut combo = chips(s.key_prefix.trim_end_matches('+'));
                 combo.push(format!("{lo}…{hi}"));
-                Row { both_modes: both(&s.raw), ..Row::new(title, &s.raw, vec![combo]) }
+                Row::new(title, &s.raw, vec![combo], &action_of(&s.raw))
             }
             None => {
                 let combos = raw.iter().map(|k| chips(k)).collect();
-                Row { both_modes: both(&raw), ..Row::new(title, &raw, combos) }
+                Row::new(title, &raw, combos, &action_of(&raw))
             }
         })
         .collect()
@@ -265,7 +335,7 @@ pub fn sections(binds: &[Bind]) -> Vec<Section> {
         .into_iter()
         .map(|name| {
             let members: Vec<&Bind> = binds.iter().filter(|b| b.group == name).collect();
-            Section { name: name.to_string(), canvas_only: is_canvas_group(name), rows: group_rows(&members) }
+            Section { name: name.to_string(), rows: group_rows(&members) }
         })
         .collect()
 }
@@ -283,20 +353,14 @@ fn tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// The sections to draw: canvas-only groups only under [`WindowMode::Canvas`], rows narrowed
-/// by `query` (every word must occur in the title or the keys), empty sections dropped.
-pub fn visible<'a>(sections: &'a [Section], mode: WindowMode, query: &str) -> Vec<(&'a Section, Vec<&'a Row>)> {
+/// The sections to draw: rows narrowed by `query` (every word must occur in the title or
+/// the keys), empty sections dropped.
+pub fn visible<'a>(sections: &'a [Section], query: &str) -> Vec<(&'a Section, Vec<&'a Row>)> {
     let words = tokens(query);
     sections
         .iter()
         .filter_map(|s| {
-            // A canvas-only section keeps its `if-canvas` rows in the Scroll mode.
-            let hide = mode != WindowMode::Canvas && s.canvas_only;
-            let rows: Vec<&Row> = s
-                .rows
-                .iter()
-                .filter(|r| (!hide || r.both_modes) && words.iter().all(|w| r.haystack.contains(w.as_str())))
-                .collect();
+            let rows: Vec<&Row> = s.rows.iter().filter(|r| words.iter().all(|w| r.haystack.contains(w.as_str()))).collect();
             (!rows.is_empty()).then_some((s, rows))
         })
         .collect()
@@ -305,12 +369,14 @@ pub fn visible<'a>(sections: &'a [Section], mode: WindowMode, query: &str) -> Ve
 // ── layout ────────────────────────────────────────────────────────────────────
 
 pub const ROW_H: f32 = 26.0;
+/// A row with a canvas line and a strip line.
+pub const SPLIT_ROW_H: f32 = 40.0;
 /// Section title (mono 10 caps, line 14) + the 6 px gap below it.
 pub const SECTION_HEAD_H: f32 = 20.0;
 
-/// Approximate height of a section of `rows` rows.
-pub fn section_height(rows: usize) -> f32 {
-    SECTION_HEAD_H + rows as f32 * ROW_H
+/// Approximate height of a section with these rows.
+pub fn section_height(rows: &[&Row]) -> f32 {
+    SECTION_HEAD_H + rows.iter().map(|r| r.height()).sum::<f32>()
 }
 
 /// Masonry: each section, in order, goes to the currently shortest column (ties: the
@@ -345,6 +411,7 @@ mod tests {
         assert_eq!(chips("Super+Alt+Escape"), ["Super", "Alt", "Esc"]);
         assert_eq!(chips("Super+q"), ["Super", "Q"]);
         assert_eq!(chips("XF86AudioRaiseVolume"), ["Vol +"]);
+        assert_eq!(chips("XF86AudioStop"), ["Stop"]);
         assert_eq!(chips("XF86Sleep"), ["sleep"]);
         assert_eq!(chips("Super+F11"), ["Super", "F11"]);
         assert!(chips("").is_empty());
@@ -397,47 +464,77 @@ mod tests {
             bind("Screenshots", "Super+Shift+3", "Screenshot screen"),
         ];
         let s = sections(&binds);
-        let names = |q: &str, mode| visible(&s, mode, q).iter().map(|(s, r)| (s.name.clone(), r.len())).collect::<Vec<_>>();
-        assert_eq!(names("", WindowMode::Scroll).len(), 3);
-        assert_eq!(names("launch", WindowMode::Scroll), [("Apps".to_string(), 1)]);
-        assert_eq!(names("NARROW", WindowMode::Scroll), [("Layout".to_string(), 1)]);
+        let names = |q: &str| visible(&s, q).iter().map(|(s, r)| (s.name.clone(), r.len())).collect::<Vec<_>>();
+        assert_eq!(names("").len(), 3);
+        assert_eq!(names("launch"), [("Apps".to_string(), 1)]);
+        assert_eq!(names("NARROW"), [("Layout".to_string(), 1)]);
         // by keys: raw spelling, chip glyph, `mod` as an alias of Super
-        assert_eq!(names("shift 3", WindowMode::Scroll), [("Screenshots".to_string(), 1)]);
-        assert_eq!(names("super+shift+3", WindowMode::Scroll), [("Screenshots".to_string(), 1)]);
-        assert_eq!(names("mod+space", WindowMode::Scroll), [("Apps".to_string(), 1)]);
-        assert_eq!(names("minus", WindowMode::Scroll), [("Layout".to_string(), 1)]);
-        assert_eq!(names("nonsense", WindowMode::Scroll), []);
+        assert_eq!(names("shift 3"), [("Screenshots".to_string(), 1)]);
+        assert_eq!(names("super+shift+3"), [("Screenshots".to_string(), 1)]);
+        assert_eq!(names("mod+space"), [("Apps".to_string(), 1)]);
+        assert_eq!(names("minus"), [("Layout".to_string(), 1)]);
+        assert_eq!(names("nonsense"), []);
         // every word has to match
-        assert_eq!(names("launcher screen", WindowMode::Scroll), []);
+        assert_eq!(names("launcher screen"), []);
+    }
+
+    fn with_action(group: &str, keys: &str, title: &str, action: &str) -> Bind {
+        Bind { action: action.into(), ..bind(group, keys, title) }
     }
 
     #[test]
-    fn canvas_groups_only_under_canvas() {
+    fn every_group_shows_without_a_mode() {
         let binds = vec![bind("Layout", "Super+C", "Center column"), bind("Canvas", "Super+0", "Fit all windows")];
         let s = sections(&binds);
-        assert!(s[1].canvas_only && !s[0].canvas_only);
-        assert_eq!(visible(&s, WindowMode::Scroll, "").len(), 1);
-        assert_eq!(visible(&s, WindowMode::Canvas, "").len(), 2);
-        // the filter applies on top of the mode
-        assert!(visible(&s, WindowMode::Scroll, "fit").is_empty());
-        assert_eq!(visible(&s, WindowMode::Canvas, "fit").len(), 1);
-        assert!(is_canvas_group("Canvas · planned") && !is_canvas_group("Apps"));
+        assert_eq!(visible(&s, "").len(), 2);
+        assert_eq!(visible(&s, "fit").len(), 1);
     }
 
     #[test]
-    fn if_canvas_binds_show_in_both_modes() {
-        let mut zoom = bind("Canvas", "Super+Equal", "Zoom in (strip: wider column)");
-        zoom.action = r#"if-canvas { canvas-zoom-in; set-column-width "+10%"; }"#.into();
-        let mut pan = bind("Canvas", "Super+Alt+Left", "Pan left");
-        pan.action = "if-canvas { canvas-pan-left; }".into();
-        let mut toggle = bind("Canvas", "Super+Ctrl+C", "Toggle strip / canvas");
-        toggle.action = "toggle-workspace-mode".into();
-        let s = sections(&[zoom, pan, toggle]);
-        let scroll = visible(&s, WindowMode::Scroll, "");
-        assert_eq!(scroll.len(), 1);
-        // Every `if-canvas` row shows (a strip-less one too: niri still accepts it there).
-        assert_eq!(scroll[0].1.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Zoom in (strip: wider column)", "Pan left"]);
-        assert_eq!(visible(&s, WindowMode::Canvas, "")[0].1.len(), 3);
+    fn modes_are_spelled_out_per_row() {
+        let rows = |binds: Vec<Bind>| sections(&binds).remove(0).rows;
+        // title carries both meanings: split into a canvas line and a strip line
+        let r = &rows(vec![with_action(
+            "Canvas",
+            "Super+Equal",
+            "Zoom in (strip: wider column)",
+            r#"if-canvas { canvas-zoom-in; set-column-width "+10%"; }"#,
+        )])[0];
+        assert_eq!(r.title, "Zoom in");
+        assert_eq!(r.modes, Modes::Split { canvas: "Zoom in".into(), strip: "Wider column".into() });
+        assert_eq!(r.height(), SPLIT_ROW_H);
+        // the strip side of a title without the "(strip: …)" spelling comes from the action
+        let r = &rows(vec![with_action(
+            "Columns",
+            "Super+Shift+WheelScrollUp",
+            "Scroll left (wheel)",
+            "if-canvas { canvas-pan-left; focus-column-left; }",
+        )])[0];
+        assert_eq!(r.modes, Modes::Split { canvas: "Scroll left (wheel)".into(), strip: "Focus column left".into() });
+        // canvas-only actions, guarded or not
+        for action in ["if-canvas { canvas-pan-left; }", "canvas-home", "toggle-window-pinned", "canvas-set-zoom 1.0"] {
+            assert_eq!(rows(vec![with_action("C", "Super+A", "Do it", action)])[0].modes, Modes::Canvas, "{action}");
+        }
+        // everything else (including the mode toggle itself) is the same in both
+        for action in ["toggle-workspace-mode", "focus-column-left", "spawn \"ashd\" \"launcher\"", ""] {
+            let r = &rows(vec![with_action("C", "Super+A", "Do it", action)])[0];
+            assert_eq!((r.modes.clone(), r.height()), (Modes::Both, ROW_H), "{action}");
+        }
+        // the filter still sees the whole title (both halves)
+        let s = sections(&[with_action("Canvas", "Super+Equal", "Zoom in (strip: wider column)", "if-canvas { canvas-zoom-in; set-column-width \"+10%\"; }")]);
+        assert_eq!(visible(&s, "wider").len(), 1);
+        assert_eq!(visible(&s, "zoom").len(), 1);
+    }
+
+    #[test]
+    fn section_height_counts_split_rows_double() {
+        let binds = vec![
+            bind("A", "Super+A", "One"),
+            with_action("A", "Super+B", "Two (strip: three)", "if-canvas { canvas-fit; center-column; }"),
+        ];
+        let s = sections(&binds);
+        let rows: Vec<&Row> = s[0].rows.iter().collect();
+        assert_eq!(section_height(&rows), SECTION_HEAD_H + ROW_H + SPLIT_ROW_H);
     }
 
     #[test]
@@ -464,20 +561,30 @@ mod tests {
         assert!(parse(r#"[{"keys":"a","title":"t","group":"g"}]"#).is_ok());
     }
 
-    /// The fixture shipped for the nested session parses and covers the project's groups.
+    /// The fixture (a copy of the generated `/etc/ashd/keybinds.json`) parses and covers the
+    /// project's groups; every mode-dependent bind says what it does in each mode.
     #[test]
     fn fixture_parses() {
         let binds = parse(include_str!("../fixtures/keybinds.json")).unwrap();
         let s = sections(&binds);
         let names: Vec<_> = s.iter().map(|s| s.name.as_str()).collect();
-        for want in ["Apps", "Windows", "Focus", "Move", "Workspaces", "Layout", "Screenshots", "Session", "Media", "Canvas"] {
+        for want in ["Apps", "Windows", "Columns", "Workspaces", "Canvas", "Scratchpad", "Shell", "Media", "Screenshots", "Session"] {
             assert!(names.contains(&want), "{want} missing from {names:?}");
         }
-        assert!(s.iter().find(|s| s.name == "Canvas").is_some_and(|s| s.canvas_only));
-        // the mockup's placeholder binds are not in the fixture
-        assert!(!binds.iter().any(|b| b.keys == "Super+D" || b.keys == "Super+S" || b.keys == "Super+V"));
         // the numbered workspaces collapse
         let ws = s.iter().find(|s| s.name == "Workspaces").unwrap();
         assert!(ws.rows.len() <= 8, "{} workspace rows", ws.rows.len());
+        // no row of an `if-canvas` bind is drawn as "the same in both modes"
+        for b in binds.iter().filter(|b| b.action.contains("if-canvas")) {
+            let row = s
+                .iter()
+                .flat_map(|s| &s.rows)
+                .find(|r| r.combos.iter().any(|c| *c == chips(&b.keys)))
+                .unwrap_or_else(|| panic!("{} has no row", b.keys));
+            assert_ne!(row.modes, Modes::Both, "{}: {}", b.keys, b.title);
+            if let Modes::Split { canvas, strip } = &row.modes {
+                assert!(!canvas.is_empty() && !strip.is_empty(), "{}", b.title);
+            }
+        }
     }
 }

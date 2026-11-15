@@ -13,7 +13,7 @@ use ashd_ui::Icon;
 use crate::{
     LauncherPanel, emoji, files,
     history,
-    model::{Act, Row, RowIcon, human_age, human_size, substring_indices, web_targets},
+    model::{Act, Row, RowIcon, human_age, human_size, looks_like_command, needs_shell, substring_indices, web_targets},
 };
 
 /// App and window rows in a mixed result list.
@@ -59,7 +59,7 @@ impl LauncherPanel {
                     app: find_app_for_window(&apps, &app_id),
                     app_id,
                     // the number the user sees (hidden scratch workspaces skipped), not niri's idx
-                    ws: w.workspace_id.and_then(|id| niri.visible_number(id)).map(|n| n.min(u8::MAX as usize) as u8),
+                    ws: w.workspace_id.and_then(|id| niri.desk_number(id)).map(|n| n.min(u8::MAX as usize) as u8),
                     focus: w.focus_timestamp.map(|t| (t.secs, t.nanos)).unwrap_or_default(),
                 }
             })
@@ -112,7 +112,9 @@ impl LauncherPanel {
 
         let pattern = Pattern::parse(q.trim(), CaseMatching::Smart, Normalization::Smart);
         let mut scored: Vec<(u32, Row)> = Vec::new();
+        let mut app_hits = 0;
         for h in search(&apps, q, MIXED_LIMIT) {
+            app_hits += 1;
             let a = &apps[h.index];
             scored.push((h.score, app_row(a, h.name_indices, running.get(a.id.as_str()).copied())));
         }
@@ -145,23 +147,39 @@ impl LauncherPanel {
                     idx.dedup();
                 }
                 cmd_hit = Some(
-                    Row::new(
+                    Row::command(
                         RowIcon::Glyph(Icon::Terminal),
                         cmd.clone(),
                         format!("command · last run {}", human_age(now.saturating_sub(*at), true)),
-                        Act::Run(cmd.clone()),
+                        cmd,
                     )
                     .matched(idx.clone())
-                    .hint("run")
-                    .alt(Act::RunInTerminal(cmd.clone())),
+                    .hint("run"),
                 );
                 break;
             }
         }
-        if rows.is_empty() && cmd_hit.is_none() {
-            return rows; // the no-results state
+        // A query that is no application (or reads as a command line) can be run: output
+        // appears right here. Nothing else in the list is for it, so it comes before the
+        // jump into the file search.
+        if app_hits == 0 || looks_like_command(q) {
+            let line = q.trim();
+            if cmd_hit.as_ref().is_some_and(|r| r.title == line) {
+                cmd_hit = None;
+            }
+            rows.extend(cmd_hit.take());
+            rows.push(
+                Row::command(
+                    RowIcon::Glyph(Icon::Terminal),
+                    format!("Run “{}”", line.chars().take(48).collect::<String>() + if line.chars().count() > 48 { "…" } else { "" }),
+                    format!("command{} · output shown here", if needs_shell(line) { " · through your shell" } else { "" }),
+                    line,
+                )
+                .hint("run"),
+            );
+        } else {
+            rows.extend(cmd_hit);
         }
-        rows.extend(cmd_hit);
         let short: String = q.trim().chars().take(24).collect();
         rows.push(
             Row::new(
@@ -213,22 +231,20 @@ impl LauncherPanel {
         let q = q.trim();
         let now = history::now();
         let hist_row = |cmd: &str, at: u64, matched: Vec<u32>| {
-            Row::new(
+            Row::command(
                 RowIcon::Glyph(Icon::Terminal),
                 cmd,
                 format!("command · last run {}", human_age(now.saturating_sub(at), true)),
-                Act::Run(cmd.to_string()),
+                cmd,
             )
             .matched(matched)
-            .alt(Act::RunInTerminal(cmd.to_string()))
         };
         if q.is_empty() {
             return self.run_history.iter().take(crate::MAX_VISIBLE + 2).map(|(c, t)| hist_row(c, *t, Vec::new())).collect();
         }
         let shell_note = if crate::model::needs_shell(q) { " · through your shell" } else { "" };
         let mut rows = vec![
-            Row::new(RowIcon::Glyph(Icon::Terminal), q, format!("run command{shell_note}"), Act::Run(q.to_string()))
-                .alt(Act::RunInTerminal(q.to_string())),
+            Row::command(RowIcon::Glyph(Icon::Terminal), q, format!("run command{shell_note} · output shown here"), q),
         ];
         let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
         let (mut buf, mut idx) = (Vec::new(), Vec::new());

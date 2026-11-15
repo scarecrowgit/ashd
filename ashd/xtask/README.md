@@ -67,7 +67,7 @@ rewriting the nested niri background):
   floating themes inset by `gap`);
 - pixels (exact token colours): main area = `bg`, rail / bar / status / scratchpad fill =
   `surface`, 1px borders = `line` (or `frame`), accent pixels in the rail, plus *measured*
-  widths from the image (rail width, bar height, status width 560 with its right border,
+  widths from the image (rail width, bar height, status width — content width, at most 560 — with its right border,
   scratchpad 340), with the scratchpad shown (`ashd scratch open`) and hidden (`ashd scratch close`);
 - the shell is still running and logged no panic.
 
@@ -96,11 +96,75 @@ own environment), and shell-core-guaranteed state is verified (modal open/closed
 scratchpad surface, theme). Screenshot per step: `target-notes/smoke-<step>.png`. Prints a
 table; exit 1 on any FAIL, dead shell or panic.
 
+## motion
+
+`cargo xtask motion [--scale 10] [--frames 14] [--only NAME]… [--env KEY=VALUE]… [--reduce-motion] [--no-build] [--niri-config F]`
+
+Does every surface really move? A nested session with a private bus; the shell runs with
+`ASHD_MOTION_SCALE` (every shell tween and spring takes N× as long), `ASHD_FRAME_LOG=1` and,
+and, for the second batch only (the shell restarts for it), `ASHD_BAR_FIXTURE=calm` (frozen,
+narrow bar readouts: a region of the bar only changes when a scenario changes it) and
+`ASHD_NET_MOCK=vpn`, unless `--env` says otherwise. It builds the two
+mocks `mock_tray` / `mock_player` (examples of `ashd-svc-tray` / `ashd-svc-mpris`) too.
+
+First batch, per scenario (launcher, quick-settings, calendar, session, notifications,
+clipboard, cheatsheet, theme-pick, scratchpad, canvas (the Scroll/Canvas toggle); `--only
+switch` (a modal leaves while another opens), `--only dock` (a `kitty --class` window comes and
+goes), `--only rail` (the active marker slides between workspaces), `--only hover` moves the
+pointer over a dock button, the bar's Canvas segment and power button, a rail workspace and a
+quick-settings tile through `wlrctl`; `--only toasts` posts and closes notifications through
+`notify-send` / `gdbus`):
+
+1. screenshot burst while it opens: at least two frames must differ from both the settled
+   *before* and *after* pictures (the frames in between exist); the picture is judged *settled*
+   when the shell's own frame log has been quiet (nothing but the bar drew) for two samples;
+2. the same while it closes, then *close restores the before state*;
+3. open → close → open back to back (a reversal in flight) must settle exactly like a plain
+   open, close → open → close exactly like the start (popups anchored to bar icons are compared
+   after realigning ±12 px: the status block's live width moves them);
+4. idle: seven seconds with nothing happening — rail, scratchpad and overlays must log zero
+   frames, the bar (fed by the 1 Hz system sample and the 160 ms meter ease) must not hold a
+   frame loop.
+
+Second batch (shell crates; each judges a *region* of the screenshot, same in-between rule):
+
+| `--only` | what |
+|---|---|
+| `bar` | tray items arrive / leave (`mock_tray`), now-playing fades in / out (`mock_player`), the unread dot pops in and shrinks away (`notify-send`, `CloseNotification`; fixture `calm` has no forced dot) |
+| `launcher-ui` | the selection plate glides to the hovered row and back, the mode chip swaps (click on it), an inline `>` command's output enters (`wlrctl keyboard type`), closing the card while `sleep` runs still animates and leaves the shell alive and the process cleaned up |
+| `osd` | fade in, fade out, the volume to brightness cross-fade, two requests 300 ms apart settle to nothing |
+| `mode` | with a `kitty` window: Scroll to Canvas (strip header leaves, minimap card shows around the switch and is hidden when idle), a settled Canvas desktop draws no frames, the minimap card collapses into its chip and expands again, back to Scroll |
+| `shape` | `theme set dusk` / `ash` (another frame shape: the frame surfaces are recreated and fade in) |
+
+The live status block of the bar (clock, cpu, mem, network) is excluded from the first
+batch's comparisons. Frames are `target-notes/motion-<scenario>-<phase>-<n>.png`, the shell log
+`target-notes/motion-shell.log`. Set `GRIM=…/bin/grim` and `WLRCTL=…/bin/wlrctl` (otherwise
+each screenshot runs `nix-build '<nixpkgs>' -A grim` first and takes seconds). `--reduce-motion` starts the shell with `ASHD_REDUCE_MOTION=1`: bursts must then
+show no more than 3 in-between frames (the 80 ms fade); the second batch is skipped there.
+
+## fullscreen
+
+`cargo xtask fullscreen [--no-build] [--niri-config F]` (needs `NIRI=` the ashd fork with
+`fullscreen-workspaces` and `edge-reveal`): a nested session with
+`assets/nested-niri-fullscreen.kdl` (`fullscreen-workspaces`, `create-workspaces-by-index`,
+`edge-reveal` for `^ashd-(rail|bar)$`, hidden scratch workspace), the shell, and a `kitty`
+window. A window goes fullscreen (`niri msg action fullscreen-window`):
+
+- niri lists one workspace with `idx` 0 and `fullscreen_origin_id` / `fullscreen_window_id` set;
+- the rail and the bar are covered (by the compositor: the shell blanks nothing), the strip header
+  (overlay layer, hidden by the shell) is off; the OSD and a toast still show over the window;
+- the pointer rests at the left edge (`wlrctl`, relative moves): the rail slides in with its real
+  content, the desk and the compact app entry with its lit marker; at the bottom edge: the bar,
+  its status block pixel-identical to the windowed bar; away from both: covered again;
+- leaving fullscreen: the workspace is gone and rail and bar look as before.
+
+Screenshots: `target-notes/fullscreen-NN-<step>.png`. `ci` runs it after `smoke`.
+
 ## ci
 
 `cargo xtask ci [--fast] [--niri-config F]`: `cargo check --workspace --all-targets`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, then
-build + `shot-check --theme all` + `smoke` (`--fast` skips the nested steps;
+build + `shot-check --theme all` + `smoke` + `fullscreen` (`--fast` skips the nested steps;
 `--niri-config` goes to both). Summary table, exit 1 if anything failed (all steps always
 run). The full gate:
 

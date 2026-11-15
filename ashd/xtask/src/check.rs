@@ -5,8 +5,8 @@
 //! (desk-05..09): attached themes have no margin (rail and scratchpad stop above the
 //! full-width bar); floating themes inset every surface by `gap`, the rail loses
 //! `bar_h + 3*gap` of height (it ends `gap` above the bottom row), the scratchpad is full
-//! height (`h - 2*gap`, desk-06 `340 × 1060`), and the bottom row is a 560 status pill
-//! followed by the dock pill(s), not one bordered bar.
+//! height (`h - 2*gap`, desk-06 `340 × 1060`), and the bottom row is a status pill
+//! (content width, at most 560) followed by the dock pill(s), not one bordered bar.
 
 use std::{process::ExitCode, time::Duration};
 
@@ -272,26 +272,27 @@ pub fn check_image(img: &RgbaImage, lay: &Layout, t: &Tokens, scratch: bool) -> 
     );
 
     // bar: attached — the full-width bar, probed right of the dock; floating — the status
-    // pill, probed in its empty right part (left of the bell, clear of rounded corners).
+    // pill, probed in its clock area (clear of rounded corners and the text).
     let st = lay.status;
-    let bx = if lay.floating { st.x + st.w - 20 } else { bxp };
+    let bx = if lay.floating { st.x + 40 } else { bxp };
     r.pixel("bar fill = surface", img, bx, bar.y + 3, &[("surface", surface)]);
     r.pixel("bar top border", img, bx, bar.y, &borders);
     r.pixel("above the bar = bg", img, bx, bar.y - 1, &[("bg", bg)]);
     r.eq(format!("bar height measured on column {bx}"), bar.h, run_len(img, bx, bar.y + bar.h - 1, 0, -1, bg));
 
-    // status block (BarStart): 560 wide, 1px border on its right edge (attached: the
-    // separator to the dock; floating: the pill's own frame).
-    let status_edge = st.x + st.w - 1;
+    // status block (BarStart): hugs its content, at most STATUS_W wide, 1px border on its
+    // right edge (attached: the separator to the dock; floating: the pill's own frame).
+    let first_border = (st.x + 1..bar.x + bar.w).find(|&x| px(img, x, lay.probe_y).is_some_and(|p| p == line || p == frame));
+    let measured_w = first_border.map_or(-1, |x| x - st.x + 1);
+    r.push("status width measured (content width, at most STATUS_W)", measured_w > 1 && measured_w <= st.w, format!("<= {}", st.w), measured_w.to_string());
+    let status_edge = st.x + measured_w.max(2) - 1;
     let ey = if lay.floating { bar.y + bar.h / 2 } else { bar.y + 3 };
     r.pixel("status fill beside border = surface", img, status_edge - 1, ey, &[("surface", surface)]);
     r.pixel("status right border", img, status_edge, ey, &borders);
-    let first_border = (st.x + 1..bar.x + bar.w).find(|&x| px(img, x, lay.probe_y).is_some_and(|p| p == line || p == frame));
-    r.eq("status width measured (first border on the bar row)", st.w, first_border.map_or(-1, |x| x - st.x + 1));
     if lay.floating {
         // gap between the status pill and the dock row; the row ends at the main area's
         // right edge, `gap` left of a shown scratchpad.
-        r.pixel("status/dock gap = bg", img, st.x + st.w + lay.gap / 2, bar.y + bar.h / 2, &[("bg", bg)]);
+        r.pixel("status/dock gap = bg", img, status_edge + 1 + lay.gap / 2, bar.y + bar.h / 2, &[("bg", bg)]);
         if scratch {
             r.pixel("dock row/scratchpad gap = bg", img, sc.x - lay.gap / 2, bar.y + bar.h / 2, &[("bg", bg)]);
             r.pixel("scratchpad beside the bottom row = surface", img, sc.x + sc.w / 2, bar.y + bar.h / 2, &[("surface", surface)]);

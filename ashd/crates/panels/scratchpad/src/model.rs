@@ -103,7 +103,7 @@ pub fn hidden_windows(niri: &NiriState, apps: &[App], since: &HashMap<u64, Insta
             let app = app_for_app_id(apps, &app_id);
             let origin = w
                 .hidden_from_workspace_id
-                .and_then(|id| niri.workspaces.get(&id))
+                .and_then(|id| niri.desk(id).or_else(|| niri.workspaces.get(&id)))
                 .map(|ws| {
                     let n = niri.visible_number(ws.id).map_or(ws.idx.max(1), |n| n.min(u8::MAX as usize) as u8);
                     workspace_label(n, ws.name.as_deref())

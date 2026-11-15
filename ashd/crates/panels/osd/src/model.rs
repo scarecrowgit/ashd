@@ -1,4 +1,4 @@
-//! What the OSD shows, as plain data (no GPUI): kinds, the volume bar maths, layout codes.
+//! What the OSD shows, as plain data (no GPUI): kinds and the volume bar maths.
 
 /// One OSD variant.
 #[derive(Clone, Debug, PartialEq)]
@@ -7,8 +7,6 @@ pub enum Kind {
     Volume,
     /// Default source: "Microphone muted" / "Microphone on".
     Mic,
-    /// Keyboard layout chip + name.
-    Layout { name: String },
     /// First display's brightness: sliders icon, bar, value (det-06 "brightness").
     Brightness,
 }
@@ -61,42 +59,6 @@ pub fn brightness_bar(level: f32, has_display: bool) -> Bar {
     }
 }
 
-/// Two-letter chip text for a niri/xkb layout name: `English (US)` -> `EN`.
-pub fn layout_code(name: &str) -> String {
-    const KNOWN: &[(&str, &str)] = &[
-        ("english", "EN"),
-        ("russian", "RU"),
-        ("ukrainian", "UA"),
-        ("german", "DE"),
-        ("french", "FR"),
-        ("spanish", "ES"),
-        ("italian", "IT"),
-        ("portuguese", "PT"),
-        ("polish", "PL"),
-        ("czech", "CZ"),
-        ("swedish", "SE"),
-        ("norwegian", "NO"),
-        ("danish", "DK"),
-        ("finnish", "FI"),
-        ("dutch", "NL"),
-        ("greek", "GR"),
-        ("turkish", "TR"),
-        ("hebrew", "HE"),
-        ("arabic", "AR"),
-        ("japanese", "JA"),
-        ("korean", "KO"),
-        ("chinese", "ZH"),
-        ("belarusian", "BY"),
-        ("georgian", "KA"),
-        ("armenian", "HY"),
-    ];
-    let lower = name.trim().to_ascii_lowercase();
-    if let Some((_, code)) = KNOWN.iter().find(|(lang, _)| lower.starts_with(lang)) {
-        return (*code).to_string();
-    }
-    lower.chars().filter(|c| c.is_alphabetic()).take(2).collect::<String>().to_uppercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,13 +103,5 @@ mod tests {
         assert_eq!(brightness_bar(-1.0, true).fill, 0.0);
         assert_eq!(brightness_bar(f32::NAN, true).text, "0");
         assert_eq!(brightness_bar(0.5, false).text, "--");
-    }
-
-    #[test]
-    fn layout_codes() {
-        assert_eq!(layout_code("English (US)"), "EN");
-        assert_eq!(layout_code("Russian"), "RU");
-        assert_eq!(layout_code("Esperanto"), "ES");
-        assert_eq!(layout_code("  "), "");
     }
 }

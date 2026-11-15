@@ -6,21 +6,24 @@
 //! Components with a value take a callback compatible with `cx.listener`:
 //! `toggle("wifi", on, cx.listener(|this, on: &bool, _, cx| …), cx)`.
 
-use std::time::{Duration, Instant};
-
 use gpui::{
-    AnimationExt as _,
-    AnyElement, App, Bounds, ClickEvent, Div, ElementId, FontWeight, Global, Hsla, InteractiveElement as _,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Stateful, Window, canvas, div,
-    hsla, prelude::*, px, relative,
+    AnyElement, App, Bounds, ClickEvent, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, SharedString, Stateful, Window, canvas, div, hsla, prelude::*, px, relative,
 };
 
 use crate::{
-    anim::{self, motion},
+    anim::motion,
+    fx::{fill_bar, follow, hover_wash, mix},
     icons::{Icon, icon},
     metrics,
+    presence::Timing,
     theme::theme,
 };
+
+/// 120 ms standard: a switch flipping.
+const FLIP: Timing = Timing::new(motion::DUR_FAST, motion::EASE_STANDARD);
+/// 80 ms: a slider thumb catching up with a value that jumped (a click on the track).
+const CATCH_UP: Timing = Timing::new(motion::timing::HOVER, motion::EASE_STANDARD);
 
 fn clear() -> Hsla {
     hsla(0., 0., 0., 0.)
@@ -115,7 +118,7 @@ pub fn icon_button_sized(id: impl Into<ElementId>, ic: Icon, box_size: f32, icon
         .justify_center()
         .rounded(t.radius_control)
         .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg))
+        .child(hover_wash(hover_bg, Some(t.line), t.radius_control))
         .child(icon(ic, icon_size).text_color(fg))
 }
 
@@ -154,22 +157,16 @@ pub fn segmented(
                 .items_center()
                 .cursor_pointer()
                 .when(active, |d| d.bg(t.accent).text_color(t.on_accent))
-                .when(!active, |d| d.text_color(t.fg_muted).hover(move |s| s.bg(s2)))
+                .when(!active, |d| d.text_color(t.fg_muted).child(hover_wash(s2, None, px(0.))))
                 .child(SharedString::from(text.to_uppercase()))
                 .on_click(move |_: &ClickEvent, window, cx| on_select(&ix, window, cx))
         }))
 }
 
-/// Click timestamps of toggles, so the knob only animates after a click (not when a panel
-/// opens with the switch already on).
-#[derive(Default)]
-struct ToggleFlips(std::collections::HashMap<ElementId, (u64, Instant)>);
-
-impl Global for ToggleFlips {}
-
 /// 34×18 switch (1px border, 12×12 knob inset 2px). On: accent track and border,
-/// `on-accent` knob; off: line border, `fg-muted` knob. The knob slides over 120 ms
-/// (standard curve) after a click.
+/// `on-accent` knob; off: line border, `fg-muted` knob. A change of `on` (a click, or
+/// the service flipping it) glides over 120 ms (standard curve): knob, track and border
+/// together; a switch that is drawn already on does not animate.
 pub fn toggle(
     id: impl Into<ElementId>,
     on: bool,
@@ -178,53 +175,39 @@ pub fn toggle(
 ) -> Stateful<Div> {
     let t = theme(cx);
     let id: ElementId = id.into();
-    let (track, border, knob) = if on { (t.accent, t.accent, t.on_accent) } else { (clear(), t.line, t.fg_muted) };
+    let (line, accent, on_accent, muted) = (t.line, t.accent, t.on_accent, t.fg_muted);
     let travel = metrics::TOGGLE_W - 2.0 - metrics::TOGGLE_KNOB - 4.0;
     let (x_off, x_on) = (2.0, 2.0 + travel);
     let radius = t.radius_control;
-    let knob_el = div()
-        .absolute()
-        .top(px(2.))
-        .size(px(metrics::TOGGLE_KNOB))
-        .rounded((radius - px(1.)).max(px(0.)))
-        .bg(knob);
-    let flip = cx
-        .try_global::<ToggleFlips>()
-        .and_then(|f| f.0.get(&id))
-        .filter(|(_, at)| at.elapsed() < Duration::from_millis(500))
-        .map(|(seq, _)| *seq);
-    let knob_el: AnyElement = match flip {
-        Some(seq) => {
-            let (from, to) = if on { (x_off, x_on) } else { (x_on, x_off) };
-            let anim_id = ElementId::NamedInteger(format!("{id}-knob").into(), seq);
-            knob_el
-                .left(px(from))
-                .with_animation(anim_id, anim::tween(motion::DUR_FAST, motion::EASE_STANDARD), move |el, t| {
-                    el.left(px(anim::lerp(from, to, anim::move_t(t))))
-                })
-                .into_any_element()
-        }
-        None => knob_el.left(px(if on { x_on } else { x_off })).into_any_element(),
-    };
-    let flip_id = id.clone();
+    let knob_radius = (radius - px(1.)).max(px(0.));
+    let fx = follow("toggle-fx", if on { 1.0 } else { 0.0 }, FLIP, move |p| {
+        div()
+            .absolute()
+            .size_full()
+            .border_1()
+            .border_color(mix(line, accent, p))
+            .bg(mix(clear(), accent, p))
+            .rounded(radius)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.))
+                    .left(px(x_off + (x_on - x_off) * p))
+                    .size(px(metrics::TOGGLE_KNOB))
+                    .rounded(knob_radius)
+                    .bg(mix(muted, on_accent, p)),
+            )
+    });
     div()
         .id(id)
         .w(px(metrics::TOGGLE_W))
         .h(px(metrics::TOGGLE_H))
         .flex_none()
-        .border_1()
-        .border_color(border)
         .rounded(radius)
-        .bg(track)
         .cursor_pointer()
         .relative()
-        .child(knob_el)
-        .on_click(move |_, window, cx| {
-            let flips = cx.default_global::<ToggleFlips>();
-            let seq = flips.0.get(&flip_id).map_or(0, |(s, _)| s + 1);
-            flips.0.insert(flip_id.clone(), (seq, Instant::now()));
-            on_toggle(&!on, window, cx)
-        })
+        .child(fx)
+        .on_click(move |_, window, cx| on_toggle(&!on, window, cx))
 }
 
 /// Horizontal meter (cpu/mem in the status bar, volume in the OSD). `value` in 0..=1.
@@ -237,25 +220,27 @@ pub fn meter(value: f32, width: f32, cx: &App) -> Div {
 pub fn meter_colored(value: f32, width: f32, fill: Hsla, cx: &App) -> Div {
     let t = theme(cx);
     let v = value.clamp(0.0, 1.0);
+    let radius = t.radius_control;
     div()
         .w(px(width))
         .h(px(metrics::METER_H))
         .flex_none()
         .bg(t.line)
         .rounded(t.radius_control)
-        .child(div().h_full().w(relative(v)).bg(fill).rounded(t.radius_control))
+        .child(fill_bar(v, fill, radius))
 }
 
 /// Thin progress bar: `height` 2 / 3 / 4 ([`metrics::PROGRESS_THIN`] …), `line` track,
 /// accent fill; full width of the parent. The toast timer is the 2px one.
 pub fn progress(value: f32, height: f32, cx: &App) -> Div {
     let t = theme(cx);
+    let accent = t.accent;
     div()
         .w_full()
         .h(px(height))
         .flex_none()
         .bg(t.line)
-        .child(div().h_full().w(relative(value.clamp(0.0, 1.0))).bg(t.accent))
+        .child(fill_bar(value, accent, px(0.)))
 }
 
 #[derive(Default)]
@@ -276,12 +261,14 @@ pub fn slider(
     let id: ElementId = id.into();
     let state = window.use_keyed_state(id.clone(), cx, |_, _| SliderState::default());
     let t = theme(cx).clone();
+    let (accent, thumb, radius) = (t.accent, t.fg, t.radius_control);
     let v = value.clamp(0.0, 1.0);
     let on_change = std::rc::Rc::new(on_change);
     let value_at = |state: &SliderState, x: Pixels| -> Option<f32> {
         let b = state.bounds?;
         Some(((x - b.left()) / b.size.width).clamp(0.0, 1.0))
     };
+    let dragging = state.read(cx).dragging;
     let (s_down, s_move, s_up, s_bounds) = (state.clone(), state.clone(), state.clone(), state);
     let (c_down, c_move) = (on_change.clone(), on_change);
     div()
@@ -298,16 +285,26 @@ pub fn slider(
                 .h(px(metrics::SLIDER_TRACK_H))
                 .bg(t.line)
                 .rounded(t.radius_control)
-                .child(div().h_full().w(relative(v)).bg(t.accent).rounded(t.radius_control))
                 .child(
-                    div()
-                        .absolute()
-                        .left(relative(v))
-                        .ml(px(-metrics::SLIDER_THUMB_W / 2.))
-                        .top(px(-(metrics::SLIDER_THUMB_H - metrics::SLIDER_TRACK_H) / 2.))
-                        .w(px(metrics::SLIDER_THUMB_W))
-                        .h(px(metrics::SLIDER_THUMB_H))
-                        .bg(t.fg),
+                    // Fill and thumb catch up with a value that jumped (a click on the
+                    // track, a service answer); a drag follows the pointer at once.
+                    follow("slider-fx", v, CATCH_UP, move |v| {
+                        div()
+                            .absolute()
+                            .size_full()
+                            .child(div().h_full().w(relative(v)).bg(accent).rounded(radius))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(relative(v))
+                                    .ml(px(-metrics::SLIDER_THUMB_W / 2.))
+                                    .top(px(-(metrics::SLIDER_THUMB_H - metrics::SLIDER_TRACK_H) / 2.))
+                                    .w(px(metrics::SLIDER_THUMB_W))
+                                    .h(px(metrics::SLIDER_THUMB_H))
+                                    .bg(thumb),
+                            )
+                    })
+                    .immediate(dragging),
                 )
                 .child(
                     canvas(
@@ -358,7 +355,9 @@ pub fn list_row(id: impl Into<ElementId>, selected: bool, cx: &App) -> Stateful<
         .text_size(px(metrics::type_scale::UI.0))
         .cursor_pointer()
         .when(selected, |d| d.bg(t.surface_2).text_color(t.fg))
-        .when(!selected, |d| d.text_color(t.fg_muted).hover(move |s| s.bg(s2).text_color(fg)))
+        .when(!selected, |d| {
+            d.text_color(t.fg_muted).hover(move |s| s.text_color(fg)).child(hover_wash(s2, None, t.radius_control))
+        })
 }
 
 /// Rich list row, min 40 high: 1px border (`line` when selected, transparent otherwise),
@@ -383,7 +382,7 @@ pub fn rich_row(id: impl Into<ElementId>, selected: bool, cx: &App) -> Stateful<
         .text_color(t.fg)
         .cursor_pointer()
         .when(selected, |d| d.bg(t.surface_2))
-        .when(!selected, |d| d.hover(move |s| s.bg(s2)))
+        .when(!selected, |d| d.child(hover_wash(s2, None, t.radius_control)))
 }
 
 /// The flexible text of a [`rich_row`]: mono 11.5, one line, ellipsis.

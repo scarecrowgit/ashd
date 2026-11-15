@@ -18,7 +18,7 @@
 # Things that do not merge as one would expect, and the generator accounts for them:
 #   - `struts` merges per side across includes, but a side set in both parts takes the
 #     later value (the fragment's). The fragment writes `struts { top }` for every theme
-#     (30 px strip header, plus the theme gap under floating themes), so once it exists
+#     (39 px strip header and focus ring; 34 px + two theme gaps under the floating themes), so once it exists
 #     it decides the top strut and `ashd.layout.topStrut` below is only the value used
 #     before the first `ashd theme apply`.
 #   - `off` on border / focus-ring is sticky unless `on` is written later: both blocks
@@ -53,6 +53,14 @@ in
       center-focused-column "always"
       // Theme default; the generated fragment sets it per theme (Ink and Moss: canvas).
       default-workspace-mode "strip"
+      // Fork option: Super+N (`focus-workspace N`, `move-column-to-workspace N`) creates
+      // workspace N right away, and empty workspaces below a used one stay, so workspace
+      // numbers never shift; only trailing empty workspaces are removed.
+      create-workspaces-by-index
+      // Fork option: a fullscreen window gets a workspace of its own right after the one it
+      // came from (no number, shown to the shell as an app); leaving fullscreen brings it
+      // back there.
+      fullscreen-workspaces
       background-color "${ash.bg}"
   ${lib.optionalString (cfg.layout.topStrut != 0) ''
       // ashd.layout.topStrut: space at the top of the working area for the strip header
@@ -101,7 +109,20 @@ in
       // The infinite canvas (mode of a workspace: strip or canvas).
       canvas {
           default-zoom 0.62
-          zoom-steps 0.4 0.5 0.62 0.75 0.9 1.0
+          // Mod+Equal / Mod+Minus step through these (about x1.35 per press); the first and
+          // last are the zoom limits for every kind of zoom.
+          zoom-steps 0.4 0.55 0.75 1.0
+          // Zoom feel (tune here): Mod+scroll over a canvas zooms continuously at the pointer
+          // by this factor per wheel notch (1 = off, the Mod+wheel binds take over); its
+          // spring is `canvas-wheel-zoom` in animations.nix.
+          wheel-zoom-factor 1.2
+          // Supersampled window contents when zoomed out (false: plain bilinear, aliased).
+          smooth-zoom-out true
+          // Window titles at a constant on-screen size above canvas windows once the zoom
+          // drops below `title-labels-below` (they fade in over the next 0.1); size in px.
+          title-labels true
+          title-labels-below 0.7
+          title-labels-size 12
           pan-step 120
           grid "lines"
           grid-spacing 80
@@ -117,5 +138,17 @@ in
   window-rule {
       geometry-corner-radius 0
       clip-to-geometry true
+  }
+
+  // Fork option: over a fullscreen window, resting the pointer against the left or bottom
+  // edge slides the shell's rail or bar (with the dock) in; they slide out when the pointer
+  // leaves them. Never while a game holds the pointer (pointer lock / confinement), a button
+  // is held or a grab is active. The panels also slide (instead of popping) when a window
+  // enters or leaves fullscreen.
+  edge-reveal {
+      on
+      dwell-ms 150
+      hide-delay-ms 400
+      namespace "^ashd-(rail|bar)$"
   }
 ''

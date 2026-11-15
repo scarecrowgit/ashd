@@ -1,6 +1,6 @@
 # VENDORED COPY of `niri-ipc` from the niri fork
 #   repo:   https://github.com/scarecrowgit/niri (branch `ashd`)
-#   commit: 836100bd (ashd fork: canvas, hidden workspaces, view IPC, quiet screenshots, visual workspace indices)
+#   commit: 7b307863 (ashd fork fix/ws: canvas, hidden workspaces, view IPC, quiet screenshots, visual workspace indices, fullscreen workspaces)
 #   licence: GPL-3.0-or-later (see LICENSE, copied from the niri repo root)
 #
 # src/ is byte-identical to niri-ipc/src at that commit. Only this manifest differs

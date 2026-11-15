@@ -1,5 +1,5 @@
 //! Rendering (docs/design/pages/det-04-launcher.html): input row 52, result rows 44,
-//! calc block, status lines, empty state, footer chips.
+//! calc block, status lines, empty state, footer chips, and the output of a command.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -12,15 +12,22 @@ use ashd_tokens::{metrics, motion::timing};
 use ashd_ui::{Icon, Theme, anim, app_icon, empty_state, icon, label, overlay_panel, theme};
 
 use crate::{
-    AltSubmit, ExitMode, LauncherPanel, SelectNext, SelectPrev,
+    AltSubmit, CopyOutput, CtrlSubmit, ExitMode, LauncherPanel, RunStatus, SelectNext, SelectPrev, Submit,
     calc::CalcOut,
-    model::{MAX_VISIBLE, Row, RowIcon, highlight_ranges, mode_label},
+    model::{Act, MAX_VISIBLE, Row, RowIcon, highlight_ranges, mode_label},
+    runner::{Stream, duration_label, exit_label, Exit},
 };
 
 const ROW_H: f32 = 44.0;
 const INPUT_H: f32 = 52.0;
 const TILE: f32 = 28.0;
 const EMPTY_H: f32 = 200.0;
+/// Output lines shown at once (the output scrolls past that), and their height.
+pub const OUT_LINES: usize = 14;
+const OUT_LINE_H: f32 = 17.0;
+
+/// The keys of a command row (the output area shows the same, plus its own).
+const COMMAND_HINTS: &str = "↵ run here · ⌃↵ in a terminal · ⇧↵ in the background";
 
 /// The chips of the footer, in mockup order.
 const CHIPS: [LauncherMode; 5] =
@@ -32,16 +39,19 @@ impl Render for LauncherPanel {
         let q = self.query(cx);
         let body: AnyElement = match self.mode {
             Some(LauncherMode::Calc) => self.render_calc(&q, &t, cx),
+            _ if self.run.is_some() => self.render_output(&t, cx),
             _ => self.render_list(&q, &t, cx),
         };
-        let footer = self.mode.is_none().then(|| self.render_footer(&t, cx));
+        let footer = (self.mode.is_none() && self.run.is_none()).then(|| self.render_footer(&t, cx));
         let seq = self.open_seq;
         div().size_full().flex().justify_center().items_start().child(
             overlay_panel(cx)
                 .id("launcher-panel")
                 .occlude()
                 .key_context("Launcher")
-                .on_action(cx.listener(|this, _: &AltSubmit, _, cx| this.activate(true, cx)))
+                .on_action(cx.listener(|this, _: &AltSubmit, _, cx| this.activate(Submit::Alt, cx)))
+                .on_action(cx.listener(|this, _: &CtrlSubmit, _, cx| this.activate(Submit::Ctrl, cx)))
+                .on_action(cx.listener(|this, _: &CopyOutput, _, cx| this.copy_output(cx)))
                 .on_action(cx.listener(|this, _: &ExitMode, _, cx| this.exit_mode(cx)))
                 .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.move_selection(1, cx)))
                 .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.move_selection(-1, cx)))
@@ -98,6 +108,10 @@ impl LauncherPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.exit_mode(cx)))
                 .into_any_element(),
         };
+        // search glyph <-> mode chip: the lead dips and comes back when the mode changes
+        let lead = ashd_ui::swap("launcher-lead", self.mode.map(|m| m.prefix().to_string()), move |p| {
+            div().flex().flex_none().items_center().opacity(p).child(lead)
+        });
         let empty = self.input.read(cx).text().is_empty();
         let in_mode = self.mode.is_some();
         div()
@@ -122,7 +136,14 @@ impl LauncherPanel {
                     .text_color(t.fg)
                     .child(self.input.clone());
                 // Backspace in an empty prefix mode leaves the mode (see ExitMode binding).
-                if in_mode && empty { d.key_context("LauncherEmpty") } else { d }
+                if self.run.is_some() {
+                    // Ctrl+C copies the output (see CopyOutput)
+                    d.key_context("LauncherOutput")
+                } else if in_mode && empty {
+                    d.key_context("LauncherEmpty")
+                } else {
+                    d
+                }
             })
             .child(label("esc", cx))
     }
@@ -193,8 +214,9 @@ impl LauncherPanel {
             .items_center()
             .gap(px(12.))
             .border_l_2()
-            .border_color(if selected { accent } else { hsla(0., 0., 0., 0.) })
-            .bg(if selected { s2 } else { hsla(0., 0., 0., 0.) })
+            .border_color(hsla(0., 0., 0., 0.))
+            // the selection (keys or pointer) moves from row to row by fading (120 ms)
+            .child(ashd_ui::select_plate(("launcher-plate", ix as u32), selected, s2, Some(accent)))
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if this.selected != ix {
@@ -204,7 +226,7 @@ impl LauncherPanel {
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = ix;
-                this.activate(false, cx);
+                this.activate(Submit::Primary, cx);
             }))
             .child(
                 div()
@@ -250,7 +272,9 @@ impl LauncherPanel {
     /// The muted line under the rows (files status, key hints).
     fn status_line(&self, q: &str) -> Option<String> {
         let typed = !q.trim().is_empty();
+        let on_command = matches!(self.rows.get(self.selected).map(|r| &r.primary), Some(Act::Run(_)));
         match self.mode {
+            None if on_command => Some(COMMAND_HINTS.into()),
             None | Some(LauncherMode::Calc) => None,
             Some(LauncherMode::Files) => match (&self.files.results, typed) {
                 (_, false) => Some("Type to search files · ⇧↵ opens the containing folder".into()),
@@ -268,7 +292,7 @@ impl LauncherPanel {
             Some(LauncherMode::Run) => Some(if self.rows.is_empty() {
                 "No history yet · type a command and press ↵".into()
             } else {
-                "↵ run · ⇧↵ run in a terminal".into()
+                COMMAND_HINTS.into()
             }),
             Some(LauncherMode::Emoji) => Some("↵ copy to the clipboard".into()),
             Some(LauncherMode::Web) => Some(if typed {
@@ -285,10 +309,6 @@ impl LauncherPanel {
         }
         let q = q.trim();
         let (title, hint) = match self.mode {
-            None if !q.is_empty() => (
-                "No results".to_string(),
-                format!("Press ↵ to run “{q}” as a command, or ⇧↵ to search the web."),
-            ),
             Some(LauncherMode::Files) if !q.is_empty() && !self.files.searching && self.files.results.is_some() => {
                 ("No files".to_string(), format!("Nothing in your files matches “{q}”."))
             }
@@ -331,6 +351,114 @@ impl LauncherPanel {
                     .child(div().text_size(px(11.5)).text_color(t.fg_muted).child(mode_label(m)))
             }),
         )
+    }
+
+    /// The output of the command that was run: header, the lines (the newest, following
+    /// the output while it grows), and a status row with the result and the keys.
+    fn render_output(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(run) = &self.run else { return div().into_any_element() };
+        let lines = run.buf.window(run.scroll, OUT_LINES);
+        let empty_note = lines.is_empty().then_some(match run.status {
+            RunStatus::Running => "no output yet",
+            _ => "no output",
+        });
+        let (status, status_color) = match &run.status {
+            RunStatus::Running => (format!("running · {}", duration_label(run.started.elapsed())), t.fg_muted),
+            RunStatus::Done { exit: Exit::Code(0), took } => (format!("exit 0 · {}", duration_label(*took)), t.ok),
+            RunStatus::Done { exit, took } => (format!("{} · {}", exit_label(*exit), duration_label(*took)), t.err),
+            RunStatus::Failed(e) => (e.clone(), t.err),
+        };
+        let more = run.buf.visible_len().saturating_sub(run.scroll + OUT_LINES);
+        let mut note = String::new();
+        if run.buf.dropped > 0 {
+            note.push_str(&format!("first {} lines dropped · ", run.buf.dropped));
+        }
+        if more > 0 {
+            note.push_str(&format!("{more} more below · "));
+        }
+        // The output area fades in when a command starts (140 ms; a run again restarts it).
+        let run_key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            run.started.hash(&mut h);
+            h.finish()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(16.))
+                    .pt(px(10.))
+                    .pb(px(6.))
+                    .font_family(t.font_mono.clone())
+                    .text_size(px(11.5))
+                    .text_color(t.fg_muted)
+                    .truncate()
+                    .child(SharedString::from(format!("$ {}", run.command))),
+            )
+            .child(
+                div()
+                    .id("launcher-output")
+                    .h(px(OUT_LINES as f32 * OUT_LINE_H))
+                    .px(px(16.))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .font_family(t.font_mono.clone())
+                    .text_size(px(12.))
+                    .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, _, cx| {
+                        let dy = match ev.delta {
+                            ScrollDelta::Lines(p) => p.y,
+                            ScrollDelta::Pixels(p) => f32::from(p.y) / OUT_LINE_H,
+                        };
+                        let lines = (-dy * 3.0).round() as isize;
+                        if lines != 0 {
+                            this.scroll_output(lines, cx);
+                        }
+                    }))
+                    .children(lines.into_iter().map(|l| {
+                        let color = if l.stream == Stream::Err { t.err } else { t.fg };
+                        div()
+                            .flex_none()
+                            .h(px(OUT_LINE_H))
+                            .line_height(px(OUT_LINE_H))
+                            .text_color(color)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(l.text))
+                    }))
+                    .children(empty_note.map(|n| div().text_color(t.fg_muted).child(n))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(16.))
+                    .py(px(8.))
+                    .border_t_1()
+                    .border_color(t.line)
+                    .text_size(px(11.5))
+                    .child(div().flex_none().font_family(t.font_mono.clone()).text_color(status_color).child(SharedString::from(status)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_right()
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(format!("{note}↵ again · ⌃↵ terminal · ⇧↵ background · ⌃C copy"))),
+                    ),
+            )
+            .with_animation(
+                gpui::ElementId::NamedInteger("launcher-output-in".into(), run_key),
+                anim::tween(timing::PAGE, anim::EASE_STANDARD),
+                |el, p| el.opacity(p),
+            )
+            .into_any_element()
     }
 
     fn render_calc(&self, q: &str, t: &Theme, cx: &mut Context<Self>) -> AnyElement {

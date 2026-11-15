@@ -15,6 +15,7 @@ let
       # `ashd fm` passes the current theme to fm (see modules/apps/files.nix).
       fileManager = if cfg.apps.fileManager == "fm" then "ashd fm" else cfg.apps.fileManager;
     };
+    reduceMotion = cfg.shell.reduceMotion;
   };
 in
 {

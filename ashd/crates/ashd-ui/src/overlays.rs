@@ -4,12 +4,14 @@
 //! overlay shadow.
 
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    AnimationExt as _, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Stateful, Styled as _, Window, div,
     prelude::*, px,
 };
 
 use crate::{
+    anim::{self, motion},
+    fx::hover_wash,
     icons::{Icon, icon},
     metrics,
     theme::theme,
@@ -127,7 +129,7 @@ impl MenuItem {
         row = if self.disabled {
             row.opacity(0.4).cursor_not_allowed()
         } else {
-            row.cursor_pointer().when(!self.selected, move |d| d.hover(move |s| s.bg(s2)))
+            row.cursor_pointer().when(!self.selected, move |d| d.child(hover_wash(s2, None, t.radius_control)))
         };
         if let Some(ic) = self.icon {
             row = row.child(div().flex().flex_none().child(icon(ic, metrics::icon_size::DENSE).text_color(icon_color)));
@@ -186,7 +188,13 @@ pub struct TooltipView {
 
 impl Render for TooltipView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        tooltip(self.text.clone(), self.shortcut.clone(), cx)
+        // 120 ms fade-in (the tooltip view only exists while it is shown, so it restarts
+        // each time).
+        tooltip(self.text.clone(), self.shortcut.clone(), cx).with_animation(
+            "tooltip-in",
+            anim::tween(motion::timing::TOOLTIP_IN, motion::EASE_STANDARD),
+            |el, p| el.opacity(p),
+        )
     }
 }
 

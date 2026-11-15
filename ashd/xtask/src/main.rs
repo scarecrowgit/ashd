@@ -5,11 +5,15 @@
 //! - `shot`: screenshot of a nested session
 //! - `shot-check`: ashd-shell frame geometry and token colours, by pixel probes
 //! - `smoke`: every IPC request, shell liveness, a screenshot per step
-//! - `ci`: check, clippy, test, shot-check, smoke
+//! - `motion`: slow-motion bursts: frames exist between the end states, reversal settles, idle draws nothing
+//! - `fullscreen`: fullscreen workspaces and edge reveal against the ashd niri fork
+//! - `ci`: check, clippy, test, shot-check, smoke, fullscreen
 
 mod check;
 mod ci;
+mod fullscreen;
 mod harness;
+mod motion;
 mod nested;
 mod shot;
 mod smoke;
@@ -39,7 +43,11 @@ enum Task {
     ShotCheck(check::CheckArgs),
     /// Drive every IPC request against ashd-shell in a nested session.
     Smoke(smoke::SmokeArgs),
-    /// check + clippy + test + shot-check + smoke.
+    /// Slow-motion burst screenshots of every surface's open / close, reversal and idle frames.
+    Motion(motion::MotionArgs),
+    /// Fullscreen window: the rail's app entry, edge reveal of the rail and bar, overlays over it (ashd niri fork).
+    Fullscreen(fullscreen::FullscreenArgs),
+    /// check + clippy + test + shot-check + smoke + fullscreen.
     Ci(ci::CiArgs),
 }
 
@@ -49,6 +57,8 @@ fn main() -> ExitCode {
         Task::Shot(a) => shot::dispatch(a),
         Task::ShotCheck(a) => check::dispatch(a),
         Task::Smoke(a) => smoke::dispatch(a),
+        Task::Motion(a) => motion::dispatch(a),
+        Task::Fullscreen(a) => fullscreen::dispatch(a),
         Task::Ci(a) => ci::dispatch(a),
     };
     match result {

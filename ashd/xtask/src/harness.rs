@@ -43,6 +43,24 @@ pub fn build_bins() -> Result<()> {
     Ok(())
 }
 
+/// The scripted mocks the motion scenarios drive (`mock_tray`, `mock_player`).
+pub fn build_examples() -> Result<()> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    for (pkg, example) in [("ashd-svc-tray", "mock_tray"), ("ashd-svc-mpris", "mock_player")] {
+        let mut cmd = Command::new(&cargo);
+        cmd.current_dir(util::workspace_root()).args(["build", "-p", pkg, "--example", example]);
+        if release_profile() {
+            cmd.arg("--release");
+        }
+        eprintln!("xtask: building example {example} …");
+        let st = cmd.status().context("running cargo build --example")?;
+        if !st.success() {
+            bail!("cargo build -p {pkg} --example {example} failed ({st})");
+        }
+    }
+    Ok(())
+}
+
 pub fn locate_bins() -> Result<Bins> {
     let dir = match std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
         Some(d) if d.join("ashd-shell").exists() || d.join("ashd").exists() => d,
@@ -105,9 +123,15 @@ impl Harness {
     }
 
     pub fn start_shell(&mut self, extra: &[&str]) -> Result<()> {
+        self.start_shell_env(extra, &[])
+    }
+
+    /// [`Self::start_shell`] with extra environment variables for the shell.
+    pub fn start_shell_env(&mut self, extra: &[&str], env: &[(&str, &str)]) -> Result<()> {
         let log = File::create(&self.shell_log)?;
         let mut cmd = self.session.command(&self.bins.shell);
         cmd.args(extra)
+            .envs(env.iter().copied())
             .env("RUST_BACKTRACE", "1")
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)

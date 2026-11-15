@@ -37,6 +37,37 @@ pub mod timing {
     pub const THEME_CROSSFADE: u64 = 300;
     /// Modal scrim fade.
     pub const SCRIM: u64 = 160;
+    /// Modal scrim fade-out ("exits are about a third faster than entrances").
+    pub const SCRIM_OUT: u64 = 100;
+
+    // ── the overlay host (ashd-shell-core), TOKENS.md §9 durations ──
+    /// A modal dialog / launcher-class panel appearing: out-expo (the launcher's own scale
+    /// is part of its view).
+    pub const MODAL_IN: u64 = 140;
+    /// ... and leaving: out-quad.
+    pub const MODAL_OUT: u64 = 100;
+    /// A popup growing out of the bar (quick settings, calendar, media, session, tray
+    /// menu): the rail-submenu timings, 120 in / 100 out.
+    pub const POPUP_IN: u64 = SUBMENU_IN;
+    pub const POPUP_OUT: u64 = SUBMENU_OUT;
+    /// Distance (px) a popup travels while it appears or leaves (the flyout's 4 px).
+    pub const POPUP_SLIDE: f32 = 4.0;
+
+    // ── small state changes ──
+    /// Hover / press wash ("instant" in the duration table).
+    pub const HOVER: u64 = 80;
+    /// Tooltip fade-in (fast: 120).
+    pub const TOOLTIP_IN: u64 = 120;
+    /// A list row appearing (fade) / leaving; the rows below move with the layout spring.
+    pub const ITEM_IN: u64 = 180;
+    pub const ITEM_OUT: u64 = 120;
+    /// A bar / meter / slider value following its data (the OSD bar, the dock indicator
+    /// class: 160 standard).
+    pub const VALUE: u64 = 160;
+    /// A tab / page / section content change (crossfade).
+    pub const PAGE: u64 = 140;
+    /// Cross-fade of text / glyph that changes value (volume icon, clock minute): fast.
+    pub const SWAP: u64 = 120;
     /// Reduce motion: movement is 0 ms, only 80 ms fades remain.
     pub const REDUCED_FADE: u64 = 80;
 }

@@ -1,10 +1,10 @@
-//! Keybinding cheatsheet (det-11): a centred modal over a scrim. Header "Keys", a filter
-//! field and the Scroll / Canvas segmented control; below, the binds of
-//! `/etc/ashd/keybinds.json` (override: `$ASHD_KEYBINDS`) as sections in three columns.
+//! Keybinding cheatsheet (det-11): a centred modal over a scrim. Header "Keys" and a filter
+//! field; below, the binds of `/etc/ashd/keybinds.json` (override: `$ASHD_KEYBINDS`) as
+//! sections in three columns. There is one sheet for both workspace modes: a bind whose
+//! action differs between strip and canvas has a row with one line per mode.
 //!
-//! Typing filters the rows instantly (never animated), Tab / the control switches the
-//! mode (canvas groups only under Canvas), Up / Down scroll when the content is taller than
-//! the output, Escape closes. `ashd cheatsheet [--open|--close]` toggles it.
+//! Typing filters the rows instantly (never animated), Up / Down scroll when the content is
+//! taller than the output, Escape closes. `ashd cheatsheet [--open|--close]` toggles it.
 //!
 //! Owner: cheatsheet. Data (loading, chips, filter, masonry): `keys.rs`; layout: `view.rs`.
 
@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use gpui::{AppContext as _, Context, Entity, Focusable as _, ScrollHandle, Window, point, px};
 use ashd_ipc::{PanelOp, Request, Response};
 use ashd_shell_core::{ModalStyle, Panel, PanelContext, PanelId, Placement};
-use ashd_tokens::WindowMode;
 use ashd_ui::{TextInput, TextInputEvent};
 
 use keys::{LoadError, Section};
@@ -35,7 +34,6 @@ pub struct CheatsheetPanel {
     pub(crate) input: Entity<TextInput>,
     pub(crate) load: Load,
     pub(crate) path: PathBuf,
-    pub(crate) mode: WindowMode,
     pub(crate) scroll: ScrollHandle,
     /// Bumped per open: a late read of a previous open must not overwrite a newer one.
     seq: u64,
@@ -53,7 +51,6 @@ impl Panel for CheatsheetPanel {
             input,
             load: Load::Loading,
             path: keys::keybinds_path(),
-            mode: WindowMode::Scroll,
             scroll: ScrollHandle::new(),
             seq: 0,
         }
@@ -71,10 +68,6 @@ impl Panel for CheatsheetPanel {
 
     fn on_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.focus_handle(cx).focus(window, cx);
-        // Open in the focused workspace's mode (ashd canvas).
-        let niri = self.ctx.niri.read(cx);
-        let canvas = niri.focused_workspace().is_some_and(|w| niri.is_canvas(w.id));
-        self.mode = if canvas { WindowMode::Canvas } else { WindowMode::Scroll };
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.seq += 1;
         let seq = self.seq;
@@ -119,21 +112,9 @@ impl CheatsheetPanel {
                 cx.notify();
             }
             TextInputEvent::Cancel => self.ctx.shell.close_modal(cx),
-            TextInputEvent::Tab => self.set_mode(
-                if self.mode == WindowMode::Scroll { WindowMode::Canvas } else { WindowMode::Scroll },
-                cx,
-            ),
             TextInputEvent::Up => self.scroll_by(-2.0 * keys::ROW_H, cx),
             TextInputEvent::Down => self.scroll_by(2.0 * keys::ROW_H, cx),
-            TextInputEvent::Submit | TextInputEvent::Blur => {}
-        }
-    }
-
-    pub(crate) fn set_mode(&mut self, mode: WindowMode, cx: &mut Context<Self>) {
-        if self.mode != mode {
-            self.mode = mode;
-            self.scroll.set_offset(point(px(0.), px(0.)));
-            cx.notify();
+            TextInputEvent::Tab | TextInputEvent::Submit | TextInputEvent::Blur => {}
         }
     }
 

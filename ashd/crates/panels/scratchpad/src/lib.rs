@@ -177,7 +177,10 @@ impl ScratchpadPanel {
     /// Called from `render` (it has the `Window`): the first frame after the surface
     /// appeared restarts the fade-in, resets the search and refreshes the data.
     pub(crate) fn ensure_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.shown {
+        // The surface stays up while the panel slides out: that is not an opening (it
+        // would clear the search and restart the staggered fade under the leaving panel).
+        let visible = self.ctx.shell.entity().is_none_or(|s| s.read(cx).scratch_visible);
+        if !self.shown && visible {
             self.shown = true;
             self.open_seq += 1;
             self.selected = None;

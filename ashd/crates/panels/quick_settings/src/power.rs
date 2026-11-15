@@ -14,13 +14,13 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, Context, Div, ElementId, Entity, FocusHandle, FontWeight, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Stateful,
-    Styled as _, Transformation, Window, div, percentage, px, relative,
+    Styled as _, Transformation, Window, div, percentage, prelude::FluentBuilder as _, px, relative,
 };
 use ashd_niri::niri_ipc::Action;
 use ashd_shell_core::PanelContext;
 use ashd_svc_logind::Inhibitor;
 use ashd_tokens::metrics;
-use ashd_ui::{Icon, icon, label, theme};
+use ashd_ui::{Icon, hover_ring, hover_wash, icon, label, theme};
 
 /// Length of the countdown.
 pub const COUNTDOWN_SECS: u32 = 10;
@@ -390,15 +390,19 @@ impl Render for PowerCountdown {
                 .font_family(t.font_sans.clone())
                 .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .child(text);
+                .cursor_pointer();
+            // The hover fill is a layer under the label, eased in over 80 ms.
+            let r = (t.radius_control - px(1.)).max(px(0.));
             if primary {
-                b = b.border_color(tint).bg(tint).text_color(t.on_accent).hover(|s| s.opacity(0.9));
+                b = b
+                    .border_color(tint)
+                    .bg(tint)
+                    .text_color(t.on_accent)
+                    .child(hover_wash(ashd_ui::mix(tint, gpui::black(), 0.12), None, r));
             } else {
-                let s2 = t.surface_2;
-                b = b.border_color(t.line).text_color(t.fg).hover(move |s| s.bg(s2));
+                b = b.border_color(t.line).text_color(t.fg).child(hover_wash(t.surface_2, None, r));
             }
-            b
+            b.child(text)
         };
         let cancel = {
             let e = entity.clone();
@@ -478,18 +482,21 @@ pub fn session_button(
         .border_1()
         .border_color(line)
         .rounded(t.radius_control)
-        .text_color(fg)
-        .child(icon(ic, metrics::SESSION_ICON).text_color(fg));
+        .text_color(fg);
     if disabled {
-        b.opacity(0.4)
+        b.child(icon(ic, metrics::SESSION_ICON).text_color(fg)).opacity(0.4)
     } else {
         let b = match focus {
             Some(h) => b.track_focus(h).tab_index(0),
             None => b,
         };
+        // Hover: `surface-2` (+ the tint border of Shut down), pressed: `line`; both ease in.
+        let inner = (t.radius_control - px(1.)).max(px(0.));
         b.cursor_pointer()
-            .hover(move |s| s.bg(s2).border_color(tint.unwrap_or(line)))
-            .active(move |s| s.bg(line).top(px(1.)))
+            .child(hover_wash(s2, Some(line), inner))
+            .when_some(tint, |d, c| d.child(hover_ring(c, px(1.), t.radius_control)))
+            .child(icon(ic, metrics::SESSION_ICON).text_color(fg))
+            .active(move |s| s.top(px(1.)))
             .focus_visible(move |s| s.border_color(fg))
     }
 }
